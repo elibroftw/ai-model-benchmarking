@@ -1,0 +1,22 @@
+.env
+.env.local
+
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+
+.venv/
+venv/
+env/
+
+# Scratch output, overwritten every run. The durable record is trials/,
+# which is deliberately NOT ignored.
+results/
+
+.DS_Store
+.idea/
+.vscode/
+.claude/

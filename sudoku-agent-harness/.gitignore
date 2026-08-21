@@ -1,0 +1,20 @@
+.env
+.env.local
+
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+
+.venv/
+venv/
+env/
+
+# Snapshots of each model's agent working dir, for cheat auditing.
+archive/
+
+.DS_Store
+.idea/
+.vscode/
+.claude/

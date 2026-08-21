@@ -1,0 +1,51 @@
+# Sudoku Vision Benchmark - models to test.
+#
+# A model is its OpenRouter model ID
+# We will try to inference HF exclusive models in the future
+# Intelligence index: https://artificialanalysis.ai/evaluations/artificial-analysis-intelligence-index
+
+[models]
+
+open-weight = [
+    # vision-capable
+    "moonshotai/kimi-k3",
+    "minimax/minimax-m3",
+    "xiaomi/mimo-v2.5",
+    "thinkingmachines/inkling",
+    "thinkingmachines/inkling-small",
+    "google/gemma-4-31b-it",
+    "meta/muse-glimmer-30b",
+    # TODO: use https://www.reddit.com/r/LocalLLaMA/comments/1vsr67c/introducing_qwen3827b_dynamic_v3_unsloth_ggufs/
+    "qwen/qwen3.8-27b",
+    # text-only
+    "~deepseek/deepseek-v4-flash-latest",
+    "deepseek/deepseek-v4-pro-0813",
+    "inclusionai/ling-3.0-flash",
+    "xiaomi/mimo-v2.5-pro",
+    "z-ai/glm-5.2",
+    "z-ai/glm-5.3",
+    "qwen/qwen3.8-2.4t-a95b",
+    # TODO: evaluate https://ornith.ai/ornith_1_5.html
+]
+
+# The so called Frontier
+proprietary = [
+    "google/gemini-3.7-flash",
+    "qwen/qwen3.8-max",
+    "openai/gpt-5.6-sol",
+    "openai/gpt-5.6-sol-pro",
+    "anthropic/claude-fable-5",
+    "anthropic/claude-opus-5",
+    "x-ai/grok-4.6",
+    "meta/muse-spark-1.2",
+]
+
+baseline = [
+    "google/gemini-3.1-flash-lite-image",
+    "google/gemini-3.1-flash-image"
+]
+
+# Models that resort to cheating (i.e. these models are beneath the blind intelligence threshold)
+disabled = [
+    "moonshotai/kimi-k2.6"
+]

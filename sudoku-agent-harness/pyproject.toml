@@ -1,0 +1,23 @@
+[project]
+name = "sudoku-agent-harness"
+version = "0.1.0"
+description = "Agentic Sudoku-solving harness using smolagents + OpenRouter."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "smolagents>=1.0",
+    "litellm>=1.40",
+    "pillow>=10.0",
+    "python-dotenv>=1.0",
+    "numpy>=1.26",
+]
+
+[project.scripts]
+sudoku-agent-harness = "sudoku_agent_harness.__main__:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["sudoku_agent_harness"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
