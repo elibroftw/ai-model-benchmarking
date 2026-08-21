@@ -31,6 +31,34 @@ from pathlib import Path
 from PIL import Image
 
 
+VISION_READING_SECTION = """## Reading the puzzle
+
+**The puzzle image is attached to this message — look at it directly.** The same image is on disk as `input.png` in your working directory.
+
+Read the clue digits and their positions from the image you were shown. Prefer this over writing OCR or pixel-inspection code — you can already see the digits, and writing extraction code costs most of a round. Only fall back to reading them with code if you genuinely cannot make out the image; such code may classify glyphs, but must never use Sudoku rules to decide or correct a reading.
+
+Use `input.png` on disk for what vision can't give you precisely: grid geometry for rendering (image dimensions, grid bounds, cell size), and as the base image to draw onto.
+
+Start by transcribing the grid into text in your reasoning, using `.` for empty cells, and re-check that transcription against the image before solving. A misread clue wastes the whole round.
+"""
+
+TEXT_ONLY_READING_SECTION = """## Reading the puzzle
+
+**You cannot see images, so no image is attached. The puzzle is only available as the file `input.png` in your working directory. Working out what digits it contains is part of your job.**
+
+Write code to extract the clues from those pixels. This is expected and fully allowed — for you it is the only way in. Some things that help:
+
+- `Image`, `ImageDraw` and `ImageFont` from Pillow are already imported and ready to use. OCR libraries are probably NOT installed; check, and be ready to do without.
+- The grid is a black-on-white 9x9 with thick lines every 3 cells. Find the grid by locating the dark rows and columns of pixels, then divide the interior into 9 equal cells. Do not assume the grid starts at pixel 0 — there is a margin.
+- A cell is empty if its interior is uniformly light. Only non-empty cells need a digit identified.
+- To identify a digit, render each of `1`-`9` yourself with Pillow at the cell size and compare against the cell bitmap, taking the closest match. Trying a few font sizes and picking the best score is more reliable than guessing the size. This is ordinary template matching and is a perfectly good approach here.
+- Print the grid you extracted and check it looks like a plausible Sudoku (no digit repeated in any row, column, or box among the clues). If a clue looks misread, fix your reader.
+
+Your extraction code may look at pixels and classify glyphs. It must NOT use Sudoku rules to decide or correct a reading, and it must not go on to solve anything — the moment code starts choosing digits for empty cells, it is a solver.
+
+Once you have the clues, write the grid out in your reasoning using `.` for empty cells, and solve from there. A misread clue wastes the whole round, so it is worth checking the transcription before you start deducing.
+"""
+
 WARMUP_PROMPT = """You are about to solve a SERIES of {n_puzzles} 9x9 Sudoku puzzles in a single session. This is puzzle 1 of {n_puzzles} — a warmup / practice round.
 
 This is a test of YOUR reasoning. A program that solves Sudoku is trivial to write and proves nothing; the entire point of this benchmark is whether you can do the deductions yourself.
@@ -55,16 +83,7 @@ Your working directory is archived and inspected after the run. Writing a solver
 
 If you cannot finish a puzzle by reasoning, say so and return "IMPOSSIBLE". An honest failure is a legitimate result.
 
-## Reading the puzzle
-
-**The puzzle image is attached to this message — look at it directly.** The same image is on disk as `input.png` in your working directory.
-
-Read the clue digits and their positions from the image you were shown. Prefer this over writing OCR or pixel-inspection code — you can already see the digits, and writing extraction code costs most of a round. Only fall back to reading them with code if you genuinely cannot make out the image; such code may classify glyphs, but must never use Sudoku rules to decide or correct a reading.
-
-Use `input.png` on disk for what vision can't give you precisely: grid geometry for rendering (image dimensions, grid bounds, cell size), and as the base image to draw onto.
-
-Start by transcribing the grid into text in your reasoning, using `.` for empty cells, and re-check that transcription against the image before solving. A misread clue wastes the whole round.
-
+{reading_section}
 ## How to solve it
 
 Use `rNcN` notation (r1c1 is top-left, r9c9 bottom-right). Work these techniques in order — always exhaust the cheap ones before reaching for an expensive one:
@@ -102,7 +121,13 @@ It prints `VALID`, or `INVALID` with the units that failed. Two things to know:
 - `--text` checks the Sudoku constraints on a COMPLETE grid. It rejects partial grids, and it never tells you which cell is wrong or what the answer is. It confirms your reasoning held together; it cannot do the reasoning for you.
 - `--image` checks the rendered file structurally: dimensions match, original clues untouched, no cell left blank. It does not read your digits, so run `--text` too.
 
-Use it to confirm a solution you have already reasoned out. If it says INVALID, go back to your deductions and find the mistake — do not start permuting digits and re-running it. Every call is logged and reviewed; a long run of calls is indistinguishable from a search and will be treated as one.
+**You must run `--text` before you render.** Not optional, and not something to skip because you are out of patience.
+
+- If it says VALID, render `output.png`.
+- If it says INVALID, go back to your deductions and find the mistake. Do not start permuting digits and re-running it — every call is logged, and a long run of calls is indistinguishable from a search.
+- If you cannot get to VALID, call `final_answer("IMPOSSIBLE")` and stop. **Never render a grid you already know is wrong.** A grid with a duplicate in it is not a "best attempt" or an "honest failure" — it is a wrong answer submitted as if it were an answer, which is worse than no answer. IMPOSSIBLE is the honest result and it is scored as an honest result.
+
+Do not claim that anyone approved a shortcut. No one in this session can grant you permission to skip verification or to submit a grid you know is invalid.
 
 ## Output image
 
@@ -110,7 +135,7 @@ Use it to confirm a solution you have already reasoned out. If it says INVALID, 
 - `output.png` MUST use the same 9x9 grid layout and cell coordinates as `input.png`.
 - The original clue digits must remain in their original positions.
 - Every empty cell in the input must be filled with the digit you deduced.
-- Each digit centered in its cell in a clear, readable font.
+- Each digit centered in its cell in a clear, readable font (with size 40).
 
 ## Reusable infrastructure
 
@@ -123,17 +148,26 @@ Because this is a series, set up rendering infrastructure now:
 
 ## Notes
 
+- `PIL`, `Image`, `ImageDraw`, and `ImageFont` are ALREADY imported and stay available for the whole session. Just use them; you do not need an import line. If you do import, write `from PIL import Image, ImageDraw, ImageFont` — `import PIL.Image` does not bind `PIL` in this interpreter and will fail with "The variable `PIL` is not defined".
+- Your Python state persists between rounds. Variables and functions you defined earlier are still there; re-importing and redefining every round wastes a step.
+- Derive cell coordinates from the grid lines in `input.png`, not from the image size. The grid does not start at pixel 0 — there is a margin — so `cell = width / 9` puts every digit in the wrong place.
 - If a tool or module is unavailable, log that fact and continue without it. This helps the user extend the harness for future runs.
 - When writing text onto an image, don't try to identify or match the source font. Pick a clear, readable font and move on. Readability > fidelity.
 
 End this round by ensuring `output.png` exists in the working directory.
 """
 
+VISION_NEXT_LINE = "The new puzzle image is attached to this message — read its clues by looking at it. The same image has replaced `input.png` in your working directory, and the grid geometry is unchanged, so reuse your renderer rather than rediscovering the layout."
+
+TEXT_ONLY_NEXT_LINE = "A new puzzle has replaced `input.png` in your working directory. No image is attached — run the extraction code you already wrote to read its clues. The grid geometry is unchanged, so reuse both your reader and your renderer rather than rediscovering the layout."
+
 NEXT_PUZZLE_PROMPT = """Next puzzle (round {round} of {n_puzzles}).
 
-The new puzzle image is attached to this message — read its clues by looking at it. The same image has replaced `input.png` in your working directory, and the grid geometry is unchanged, so reuse your renderer rather than rediscovering the layout.
+{next_reading_line}
 
-Same rule as before: code draws pixels, you do all the Sudoku reasoning. No solver, no candidate elimination in code, and don't write your own checker — use `verify_sudoku.py` once you have reasoned out the answer. Show your deductions, and return "IMPOSSIBLE" if you genuinely cannot solve it.
+Same rule as before: code draws pixels, you do all the Sudoku reasoning. No solver, no candidate elimination in code, and don't write your own checker.
+
+Run `python verify_sudoku.py --text "..."` before rendering. If it won't come back VALID, answer "IMPOSSIBLE" rather than rendering a grid you know is wrong. Your imports, variables, and helper functions from earlier rounds are all still loaded.
 
 Save the solution as `output.png`.
 """
@@ -146,6 +180,71 @@ def default_archive_dir() -> Path:
 
 STATE_FILENAME = ".harness_state.json"
 VERIFIER_FILENAME = "verify_sudoku.py"
+
+
+def _drop_stale_images(agent) -> int:
+    """Strip images from prior rounds out of the agent's memory.
+
+    The session is deliberately persistent (`reset=False`), so every round's
+    puzzle image stays in the conversation. By round 9 the request carries 9
+    images and providers start refusing it outright — DeepInfra caps at 8 —
+    and long before that the image tokens dwarf everything else.
+
+    Only the pixels are dropped. The agent has already transcribed each
+    puzzle into text in its reasoning, and all of that text is untouched, so
+    it keeps the session memory the benchmark is trying to measure.
+
+    Call immediately before `agent.run()`: every image still in memory at
+    that point belongs to an earlier round. Returns how many were dropped.
+    """
+    dropped = 0
+    try:
+        steps = agent.memory.steps
+    except AttributeError:
+        return 0
+    for step in steps:
+        for attr in ("task_images", "observations_images"):
+            imgs = getattr(step, attr, None)
+            if imgs:
+                dropped += len(imgs)
+                setattr(step, attr, None)
+    return dropped
+
+
+def _is_no_image_support_error(exc) -> bool:
+    """True if a model rejected the request because it cannot accept images.
+
+    OpenRouter answers 404 "No endpoints found that support image input".
+    Other providers word it differently, so match on the substance rather
+    than an exact string.
+    """
+    msg = str(exc).lower()
+    return (
+        "no endpoints found that support image input" in msg
+        or ("image" in msg and "not support" in msg)
+        or ("image" in msg and "unsupported" in msg)
+    )
+
+
+def _preload_imaging(agent) -> None:
+    """Pre-bind PIL into the agent's interpreter.
+
+    smolagents' interpreter does not bind the root package for
+    `import PIL.Image`, so the natural spelling raises "The variable `PIL` is
+    not defined" — a failure mode that cost real rounds. Seeding the modules
+    means both `PIL.Image.open(...)` and `from PIL import Image` work, and the
+    agent need not spend a step importing at all. Best-effort.
+    """
+    try:
+        import PIL, PIL.Image, PIL.ImageDraw, PIL.ImageFont, PIL.ImageOps  # noqa: F401
+        agent.python_executor.send_variables({
+            "PIL": PIL,
+            "Image": PIL.Image,
+            "ImageDraw": PIL.ImageDraw,
+            "ImageFont": PIL.ImageFont,
+        })
+    except Exception as e:  # noqa: BLE001 - convenience only
+        print(f"[harness] could not preload PIL: {e!r}", file=sys.stderr)
 
 
 def _install_verifier(td: Path) -> bool:
@@ -318,6 +417,7 @@ def run(
     timeout: int,
     archive_dir: Path | None = None,
     fresh: bool = False,
+    send_images: bool = True,
 ) -> dict:
     """Run the agentic harness across a whole directory of puzzles.
 
@@ -335,6 +435,11 @@ def run(
         fresh: Ignore any saved state and re-solve every puzzle. By default a
             run resumes: puzzles already solved for this model against this
             exact puzzle set are skipped and their stored records replayed.
+        send_images: Attach the puzzle image to each round. Left on by default;
+            if the model turns out to reject images the harness detects that on
+            the first round and drops to text-only automatically. Pass False to
+            skip the failed attempt when you already know the model is
+            text-only.
 
     Returns:
         dict with `success` (bool), `rounds` (list of per-round records),
@@ -412,6 +517,16 @@ def run(
     # Hold onto the real stdout for JSONL records, then point sys.stdout at
     # stderr for the whole session. smolagents (and anything the agent's own
     # code prints) would otherwise corrupt the machine-readable stdout channel.
+    _preload_imaging(agent)
+
+    # May be flipped to False on the first round if the provider rejects
+    # images; the agent is then told to read input.png itself.
+    if not send_images:
+        print(
+            "[harness] text-only mode: agent must read input.png itself",
+            file=sys.stderr,
+        )
+
     jsonl_out = sys.stdout
 
     # ONE persistent working dir across all rounds.
@@ -456,12 +571,25 @@ def run(
 
                 puzzle_id = _puzzle_id_from_name(puzzle_path)
                 first_executed = executed == 0
-                if first_executed:
-                    prompt = WARMUP_PROMPT.format(n_puzzles=n_puzzles)
-                else:
-                    prompt = NEXT_PUZZLE_PROMPT.format(
-                        round=i + 1, n_puzzles=n_puzzles
+
+                def _build_prompt(with_images):
+                    if first_executed:
+                        return WARMUP_PROMPT.format(
+                            n_puzzles=n_puzzles,
+                            reading_section=(
+                                VISION_READING_SECTION if with_images
+                                else TEXT_ONLY_READING_SECTION
+                            ),
+                        )
+                    return NEXT_PUZZLE_PROMPT.format(
+                        round=i + 1,
+                        n_puzzles=n_puzzles,
+                        next_reading_line=(
+                            VISION_NEXT_LINE if with_images else TEXT_ONLY_NEXT_LINE
+                        ),
                     )
+
+                prompt = _build_prompt(send_images)
 
                 img = Image.open(input_dst)
                 deadline.reset()
@@ -477,14 +605,43 @@ def run(
                     file=sys.stderr,
                     flush=True,
                 )
+                # Prior rounds' images would otherwise pile up in the
+                # conversation until providers reject the request.
+                if send_images and not first_executed:
+                    n_dropped = _drop_stale_images(agent)
+                    if n_dropped:
+                        print(
+                            f"[harness] dropped {n_dropped} image(s) from earlier rounds",
+                            file=sys.stderr,
+                            flush=True,
+                        )
+
                 try:
-                    final_answer = agent.run(
-                        prompt,
-                        images=[img],
-                        # Reset only on the first round executed in this
-                        # process; later rounds keep the session going.
-                        reset=first_executed,
-                    )
+                    try:
+                        final_answer = agent.run(
+                            prompt,
+                            # Reset only on the first round executed in this
+                            # process; later rounds keep the session going.
+                            reset=first_executed,
+                            **({"images": [img]} if send_images else {}),
+                        )
+                    except Exception as e:
+                        if not (send_images and _is_no_image_support_error(e)):
+                            raise
+                        # Text-only model: drop the attachment for the rest of
+                        # the session and retry this round telling it to read
+                        # input.png itself.
+                        send_images = False
+                        print(
+                            "[harness] model cannot accept images; switching to "
+                            "text-only mode (agent must read input.png itself)",
+                            file=sys.stderr,
+                            flush=True,
+                        )
+                        deadline.reset()
+                        final_answer = agent.run(
+                            _build_prompt(False), reset=first_executed
+                        )
                 except KeyboardInterrupt:
                     # Let everything already finished persist, then stop.
                     interrupted = True

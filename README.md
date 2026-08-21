@@ -9,10 +9,17 @@ uv run run_benchmark.py \
     --harness-cmd "uv run --project ./sudoku-agent-harness sudoku-agent-harness" \
     --n-puzzles 3 \
     --seed 42 \
+    --skip-expensive \
     -v
 ```
 
-Models are read from `models.toml` by default.
+Models are read from `models.toml` by default. Drop `--skip-expensive` to
+include the models marked `expensive = true`; marking one is inline, so it
+stays in whichever category it belongs to:
+
+```toml
+{ id = "moonshotai/kimi-k3", expensive = true },
+```
 
 Each model gets **one sequential session**: the harness is invoked once with
 the whole puzzle directory and drives a single persistent agent through the
@@ -27,7 +34,7 @@ results/
 ├── puzzles.json                       # generated puzzles + solutions
 ├── puzzle_images/puzzle_NNN.png       # what each model saw (harness input dir)
 ├── solutions/<model>/puzzle_NNN.png   # what each model produced
-├── results_<model>.json               # per-puzzle records incl. round number
+├── <model>.json                       # per-puzzle records incl. round number
 └── leaderboard.json                   # sorted by accuracy, then avg time
 ```
 
@@ -257,3 +264,11 @@ If you tell me:
 - What kind of agent you’re testing (multimodal LLM, vision-language model with tools, autonomous desktop agent, etc.),
 - Whether Mode A or B is preferred,
 I can turn this into a concrete implementation blueprint with sample code structures and prompts.
+
+## Cost-Effective Runs
+
+When testing the benchmark/harness, these models were expensive, so skip them for development.
+
+1. Kimi K3
+2. Claude Fable 5
+3. MiniMax M3

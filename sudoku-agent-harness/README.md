@@ -99,6 +99,39 @@ first round it actually executes gets the warmup prompt again. Warmup-vs-
 steady-state learning numbers are therefore only meaningful for a run that
 completed in one go.
 
+## Image accumulation across rounds
+
+The session is deliberately persistent (`reset=False`) so the agent keeps its
+memory between puzzles — that is what the warmup-vs-steady-state measurement
+depends on. The side effect is that every round's puzzle image stays in the
+conversation, so round N sends N images. Providers refuse well before a long
+run finishes; DeepInfra caps at 8, which failed runs at round 9.
+
+Before each round the harness strips images from all earlier steps, so a
+request never carries more than the current puzzle. Only the pixels go: the
+agent's own text — including the grids it transcribed and its deductions —
+is left intact, so session memory still works and the learning signal is
+preserved. It also keeps image tokens flat instead of growing every round.
+
+## Text-only models
+
+Not every model on the leaderboard accepts images. Sending one an attachment
+gets a 404 from OpenRouter ("No endpoints found that support image input"),
+which used to kill the whole session.
+
+The harness now detects that on the first round, drops the attachment for the
+rest of the session, and retries immediately with a prompt that tells the
+agent the puzzle is only available as `input.png` and that extracting the
+clues from those pixels is part of the job. That variant also hands it a
+starting approach — locate the grid lines, split into cells, render each
+digit with Pillow and template-match — since for a text-only model the image
+reading is unavoidable overhead rather than the thing being measured.
+
+Detection costs exactly one rejected request per model, and nothing after
+that. `--no-image` skips even that for a model you already know is text-only.
+
+The solving rules do not change: pixels in, reasoning yours, no solver.
+
 ## Solving rules and the verifier
 
 The task prompt forbids the agent from writing any code that touches Sudoku

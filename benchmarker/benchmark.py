@@ -175,9 +175,15 @@ class Benchmark:
         session_error=None,
     ):
         """Grade a single solution image produced by the harness."""
+        # Checked for every puzzle, whatever the harness claimed, so the
+        # count reflects what is actually on disk rather than what was
+        # reported. A model can fail its round and still have written an
+        # image, or claim success and have written nothing.
+        solution_path = solutions_dir / f"puzzle_{puzzle['id']:03d}.png"
         record = {
             "puzzle_id": puzzle["id"],
             "difficulty": puzzle["difficulty"],
+            "output_image": solution_path.exists(),
         }
         if round_rec is not None:
             record["elapsed"] = round_rec.get("elapsed")
@@ -200,8 +206,7 @@ class Benchmark:
             record["error"] = f"harness failure: {round_rec.get('error', 'unknown')}"
             return record
 
-        solution_path = solutions_dir / f"puzzle_{puzzle['id']:03d}.png"
-        if not solution_path.exists():
+        if not record["output_image"]:
             record["error"] = f"harness reported success but {solution_path.name} is missing"
             return record
 
@@ -293,6 +298,7 @@ class Benchmark:
             if r.get("verdict", {}).get("correct"):
                 per_diff[d]["correct"] += 1
 
+        n_images = sum(1 for r in results if r.get("output_image"))
         tok_in = sum(r.get("input_tokens") or 0 for r in results)
         tok_out = sum(r.get("output_tokens") or 0 for r in results)
 
@@ -301,6 +307,10 @@ class Benchmark:
             "n_puzzles": n,
             "n_correct": n_correct,
             "n_errors": n_errors,
+            # How many solution images the model actually produced. Separates
+            # "answered and got it wrong" from "never produced an answer".
+            "n_output_images": n_images,
+            "output_rate": n_images / n if n else 0.0,
             "accuracy": n_correct / n if n else 0.0,
             "avg_elapsed_s": avg_time,
             "input_tokens": tok_in,
@@ -410,10 +420,14 @@ class Benchmark:
             print(f"  {'skipped':<9} {model} ({why})")
         print("  best-so-far standings:")
         for i, e in enumerate(trial["entries"], 1):
+            imgs = e.get("n_output_images")
+            img_col = (
+                f"  imgs={imgs}/{e.get('n_puzzles', '?')}" if imgs is not None else ""
+            )
             print(
                 f"    {i}. {e['model']}: acc={e['accuracy'] * 100:5.1f}%  "
                 f"avg={e['avg_elapsed_s']:6.2f}s  tokens={e.get('total_tokens', 0):>9,}"
-                f"  (runs={e.get('runs', 1)})"
+                f"{img_col}  (runs={e.get('runs', 1)})"
             )
 
     def run(self):
@@ -454,7 +468,7 @@ class Benchmark:
             )
 
             safe = model.replace("/", "_").replace(":", "_")
-            (self.output_dir / f"results_{safe}.json").write_text(
+            (self.output_dir / f"{safe}.json").write_text(
                 json.dumps(results, indent=2)
             )
 
@@ -464,6 +478,10 @@ class Benchmark:
             print(
                 f"  Correct: {summary['n_correct']}/{summary['n_puzzles']} "
                 f"({summary['accuracy'] * 100:.1f}%)"
+            )
+            print(
+                f"  Output images: {summary['n_output_images']}/{summary['n_puzzles']} "
+                f"({summary['output_rate'] * 100:.1f}%)"
             )
             print(f"  Avg time: {summary['avg_elapsed_s']:.2f}s")
             print(

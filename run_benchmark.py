@@ -31,11 +31,11 @@ DEFAULT_CATEGORY = "open-weight"
 DISABLED_CATEGORY = "disabled"
 
 
-def _read_models_file(path):
+def _read_models_file(path, skip_expensive=False):
     """Load model IDs from a .toml manifest, or a plain one-per-line list."""
     path = Path(path)
     if path.suffix == ".toml":
-        return _read_models_toml(path)
+        return _read_models_toml(path, skip_expensive=skip_expensive)
     models = []
     for line in path.read_text().splitlines():
         line = line.strip()
@@ -44,12 +44,13 @@ def _read_models_file(path):
     return models, []
 
 
-def _read_models_toml(path):
+def _read_models_toml(path, skip_expensive=False):
     """Parse a models.toml manifest.
 
     The [models] table maps a category name to a list of entries. Each entry
-    is either a bare id string or an inline table `{ id, note }`. The
-    `disabled` category is never run.
+    is either a bare id string or an inline table `{ id, note, expensive }`.
+    The `disabled` category is never run, and `expensive = true` entries are
+    held back when skip_expensive is set.
 
     Returns (enabled, skipped): `enabled` is a list of (id, category) and
     `skipped` a list of (id, note), so the run can report what it left out
@@ -80,8 +81,11 @@ def _read_models_toml(path):
                 raise ValueError(
                     f"{path}: [models].{category} entry #{i + 1} has no `id`."
                 )
+            expensive = bool(isinstance(item, dict) and item.get("expensive"))
             if category == DISABLED_CATEGORY:
                 skipped.append((model_id, note))
+            elif expensive and skip_expensive:
+                skipped.append((model_id, note or "marked expensive"))
             else:
                 enabled.append((model_id, category))
     return enabled, skipped
@@ -142,6 +146,12 @@ def main():
         help="Per-puzzle timeout in seconds passed to the harness. Default is 20 minutes.",
     )
     parser.add_argument(
+        "--skip-expensive",
+        action="store_true",
+        help="Skip models marked `expensive = true` in the manifest. Useful for "
+        "a cheap smoke run before committing to the costly models.",
+    )
+    parser.add_argument(
         "--trials-dir",
         default=DEFAULT_TRIALS_DIR,
         help=f"Permanent per-puzzle-set leaderboards, keeping each model's best "
@@ -171,7 +181,9 @@ def main():
                 f"No models given on the command line and models file '{path}' does not exist."
             )
         try:
-            entries, skipped = _read_models_file(path)
+            entries, skipped = _read_models_file(
+                path, skip_expensive=args.skip_expensive
+            )
         except (tomllib.TOMLDecodeError, TypeError, ValueError) as e:
             parser.error(f"Could not read models from '{path}': {e}")
         if not entries:
@@ -187,7 +199,7 @@ def main():
         print(f"Loaded {len(models)} enabled model(s) from {path} ({breakdown})")
         for model_id, note in skipped:
             reason = f" - {note}" if note else ""
-            print(f"  skipping (disabled): {model_id}{reason}")
+            print(f"  skipping: {model_id}{reason}")
 
     print(f"Models to test on the same puzzle set: {', '.join(models)}")
 

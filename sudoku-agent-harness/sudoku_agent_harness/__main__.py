@@ -61,6 +61,13 @@ def main():
         "whether it cheated.",
     )
     parser.add_argument(
+        "--no-image",
+        action="store_true",
+        help="Don't attach the puzzle image; tell the agent to read input.png "
+        "itself. Only needed to skip the one failed request for a model already "
+        "known to be text-only — otherwise this is detected automatically.",
+    )
+    parser.add_argument(
         "--fresh",
         action="store_true",
         help="Ignore saved state and re-solve every puzzle. By default a run "
@@ -80,6 +87,7 @@ def main():
             timeout=args.timeout,
             archive_dir=Path(args.archive_dir) if args.archive_dir else None,
             fresh=args.fresh,
+            send_images=not args.no_image,
         )
     except Exception as e:  # noqa: BLE001 - top-level: report and exit non-zero
         print(json.dumps({"success": False, "error": f"{type(e).__name__}: {e}"}))
