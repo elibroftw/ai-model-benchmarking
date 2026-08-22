@@ -7,19 +7,35 @@ The purpose of this benchmark is an intelligent test based on SIMPLE Rules where
 ```sh
 uv run run_benchmark.py \
     --harness-cmd "uv run --project ./sudoku-agent-harness sudoku-agent-harness" \
+    --harness-id smolagents \
     --n-puzzles 3 \
     --seed 42 \
-    --skip-expensive \
     -v
 ```
 
-Models are read from `models.toml` by default. Drop `--skip-expensive` to
-include the models marked `expensive = true`; marking one is inline, so it
+```sh
+uv run run_benchmark.py \
+    --harness-cmd "uv run --project ./dsh-agent dsh-agent --task dsh-agent/tasks/sudoku.json" \
+    --harness-id dsh \
+    --n-puzzles 3 \
+    --seed 55 \
+    -v
+```
+
+Models are read from `models.toml` by default. Use `--skip-expensive` to
+skip the models marked `expensive = true`; marking one is inline, so it
 stays in whichever category it belongs to:
 
 ```toml
 { id = "moonshotai/kimi-k3", expensive = true },
 ```
+
+The benchmarker is smart and will run the harness for models in this sort order (optimizing for test completion rather than valid comparison):
+
+least missing, never-run, open-weight > proprietary, fewest failures, non-expensive
+
+This ensures that on clean runs, tokens aren't being wasted, while fixing bugs in the project doesn't result in re-running successful trials.
+After all models have been benchmarked, it is prudent to delete the results and re-run the benchmark for a valid speed and cost comparison.
 
 Each model gets **one sequential session**: the harness is invoked once with
 the whole puzzle directory and drives a single persistent agent through the
@@ -33,14 +49,89 @@ the learning curve.
 results/
 ├── puzzles.json                       # generated puzzles + solutions
 ├── puzzle_images/puzzle_NNN.png       # what each model saw (harness input dir)
-├── solutions/<model>/puzzle_NNN.png   # what each model produced
+├── task.json                          # the task handed to the harness
+├── solutions-<harness_id>/<model>/puzzle_NNN.png   # what each model produced
 ├── <model>.json                       # per-puzzle records incl. round number
 └── leaderboard.json                   # sorted by accuracy, then avg time
 ```
 
+## The task lives here, not in the harness
+
+The harness is a general-purpose agent runner: it keeps one agent alive across
+a series of rounds, hands it an input file, collects an output file, and
+streams stats. It is told what to do; it does not know what Sudoku is.
+
+Everything task-specific lives in [`benchmarker/task.py`](benchmarker/task.py)
+— the prompts (warmup and follow-up, in vision and text-only variants), the
+input/output filenames, and the assets to drop into the agent's working
+directory, which for this task is the verifier in
+[`benchmarker/agent_assets/`](benchmarker/agent_assets/) that the agent is
+required to use instead of writing its own checker. Each run writes that out
+as `results/task.json` and passes it to the harness with `--task`.
+
+So swapping harnesses duplicates nothing: a replacement reads the same spec
+and runs the same prompts. And the prompts are versioned with the benchmark
+that depends on them — a wording change lands in one place, and every harness
+picks it up on the next run.
+
 Useful flags: `-v` streams the harness's live agent logs (pair with
 `--concurrency 1`), `--grader-model` swaps the vision model used to read
 solution images, `--difficulty` pins a single tier.
+
+`leaderboard.json` is only written when a run finishes. To rebuild the same
+view from whatever is already on disk — useful after an interrupted run —
+summarize the directory instead:
+
+```bash
+uv run summarize_results.py                      # ranked table, per-difficulty
+                                                 # accuracy, learning curve, errors
+uv run summarize_results.py --format markdown    # pasteable table
+uv run summarize_results.py --write-leaderboard   # (re)write leaderboard.json
+```
+
+When there are multiple ``solutions-*`` directories under ``results/`` (one
+per harness), each is reported in turn with a section heading. Common flags:
+
+- ``--harness-id <id>`` — restrict the report to one harness.
+- ``--write-leaderboard`` — writes ``leaderboard-<harness>.json`` per harness.
+
+It reads three sources and keeps them apart, one column each:
+
+- **`local`** — it transcribes each solution PNG itself and checks the grid
+  against the puzzle's clues and the Sudoku rules. No API, no cost, no
+  nondeterminism. This is what the report ranks on.
+- **`grader`** — the verdicts in `<model>.json` from the run's own grading LLM.
+  `n/a` when none came back.
+- **`claimed`** — `success: true` from `solutions-<harness_id>/<model>/.harness_state.json`,
+  the harness's resume file. That means only "the agent finished and wrote
+  output.png"; the `final_answer` beside it is the agent's own claim. Never
+  treated as accuracy — a model that fabricates a grid claims success exactly
+  like one that solved it.
+
+Local verification leans on the benchmark's own contract: the output image has
+the input's geometry, so the grid lines are found by projection and each cell
+is cropped exactly. Digit templates are calibrated from the rendered *input*
+images, whose contents `puzzles.json` gives exactly — a clue in an input image
+is a pixel-perfect example of that digit in the style every model started from.
+Installed fonts fill in for digits a model drew some other way.
+
+That calibration is also a self-test. Before trusting a single verdict, the
+summarizer re-reads the input images and compares them against `puzzles.json`;
+they must come back identical. If they don't, it says so, disables local
+verification and falls back to the grader rather than reporting numbers it
+can't stand behind. Cells it cannot match confidently are reported too, never
+guessed into a score.
+
+The state file also covers models the run never graded: an interrupt leaves
+the state file and no JSON, so those rounds still show up — and because the
+images are checked locally, those models still get a real score. The report
+additionally flags rounds replayed from an earlier run, state files written
+against a different puzzle set, PNG counts that disagree with the records,
+cases where the grader and the local read of the same image disagree, and every
+model the harness called successful that nothing verified.
+
+`--no-verify-images` skips the local pass (roughly 20ms per image, so a
+100-puzzle set across 25 models is about a minute).
 
 `results/` is scratch and is overwritten by every run. The durable record is
 `trials/`, which is committed:

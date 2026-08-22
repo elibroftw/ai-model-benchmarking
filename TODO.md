@@ -10,8 +10,10 @@ Our program can accept TEXT and IMAGES. If the model selected does not support i
 ## Alternative agentic harnesses
 
 The benchmarker talks to an external harness over a subprocess CLI contract
-(`--model MODEL --input INPUT.png --output OUTPUT.png`). Any program matching
-that contract can plug in. The default implementation lives in the sibling
+(`--model MODEL --task TASK.json --inputs-dir DIR --output-dir DIR`). Any
+program matching that contract can plug in, and since the task itself — every
+prompt, plus the verifier the agent is given — is passed in as `--task`, a new
+harness has no Sudoku code to duplicate. The default implementation lives in the sibling
 [sudoku-agent-harness](../sudoku-agent-harness/) repo and uses
 [smolagents](https://github.com/huggingface/smolagents).
 

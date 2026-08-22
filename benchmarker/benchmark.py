@@ -2,9 +2,11 @@
 
 Pipeline per model:
 1. Generate + render the puzzle set once; every model gets the same directory.
-2. Invoke the external agentic harness ONCE with --puzzles-dir. The harness
-   drives a single persistent agent through the puzzles sequentially (the
-   first is a warmup) and streams one JSONL record per round.
+2. Invoke the external agentic harness ONCE, handing it the puzzle directory
+   and the task spec written by task.py — the prompts and the agent's verifier
+   live here, so the harness stays a general-purpose runner and any other one
+   can be substituted. It drives a single persistent agent through the puzzles
+   sequentially (the first is a warmup) and streams one JSONL record per round.
 3. Grade each produced image by sending it to a cheap vision "grader LLM"
    that transcribes it back to a 9x9 grid.
 4. Verify each grid against the puzzle clues and Sudoku rules, and report
@@ -22,15 +24,19 @@ import httpx
 from .generator import generate_puzzle
 from .grader import parse_grader_response, verify
 from .openrouter import extract_grid
+from .get_leaderboard import summarize as _summarize
+from .task import write_spec as write_task_spec
 from .renderer import render_puzzle
 from .trials import (
     DEFAULT_TRIALS_DIR,
+    _rank_key,
     load_trial,
     merge as merge_trial,
     puzzle_fingerprint,
     save_trial,
     trial_id,
 )
+from .vision import Reader, grade_image, self_check
 
 DIFFICULTY_CLUES = {
     "easy": 42,
@@ -40,7 +46,8 @@ DIFFICULTY_CLUES = {
 }
 
 DEFAULT_HARNESS_CMD = "sudoku-agent-harness"
-DEFAULT_GRADER_MODEL = "google/gemini-flash-1.5"
+DEFAULT_HARNESS_ID = "harness"
+DEFAULT_GRADER_MODEL = "google/gemini-2.0-flash-001"
 
 
 class Benchmark:
@@ -53,10 +60,13 @@ class Benchmark:
         concurrency=4,
         difficulty="mixed",
         harness_cmd=DEFAULT_HARNESS_CMD,
+        harness_id=DEFAULT_HARNESS_ID,
         grader_model=DEFAULT_GRADER_MODEL,
         harness_timeout=300,
         verbose=False,
         trials_dir=DEFAULT_TRIALS_DIR,
+        expensive_models=None,
+        model_categories=None,
     ):
         self.models = models
         self.n_puzzles = n_puzzles
@@ -65,10 +75,14 @@ class Benchmark:
         self.concurrency = concurrency
         self.difficulty = difficulty
         self.harness_cmd = shlex.split(harness_cmd) if isinstance(harness_cmd, str) else list(harness_cmd)
+        self.harness_id = harness_id
         self.grader_model = grader_model
         self.harness_timeout = harness_timeout
         self.verbose = verbose
         self.trials_dir = Path(trials_dir) if trials_dir else None
+        self.expensive_models = set(expensive_models or [])
+        # model_categories maps model_id → TOML section name (e.g. "open-weight", "proprietary")
+        self.model_categories = model_categories or {}
 
     def generate_puzzles(self):
         if self.seed is not None:
@@ -96,18 +110,24 @@ class Benchmark:
             print(f"  puzzle {i + 1}/{self.n_puzzles} ({tier})")
         return puzzles
 
-    async def _run_harness_session(self, model, puzzles_dir, solutions_dir):
+    async def _run_harness_session(self, model, puzzles_dir, solutions_dir, task_spec):
         """Invoke the harness ONCE for the whole puzzle set.
 
         The harness drives a single persistent agent across every puzzle
         sequentially and streams one JSONL record per round to stdout. We
         consume those lines live so progress is visible during long runs.
 
+        `task_spec` is the file that makes this a Sudoku benchmark: the prompts
+        and the agent's tools live in task.py and are handed over here, so the
+        harness is a general-purpose runner and any other one can be dropped in
+        without re-implementing the task.
+
         Returns (rounds_by_puzzle_id, summary, error_or_None).
         """
         argv = self.harness_cmd + [
             "--model", model,
-            "--puzzles-dir", str(puzzles_dir),
+            "--task", str(task_spec),
+            "--inputs-dir", str(puzzles_dir),
             "--output-dir", str(solutions_dir),
             "--timeout", str(self.harness_timeout),
         ]
@@ -141,7 +161,7 @@ class Benchmark:
             if rec.get("summary"):
                 summary = rec
                 continue
-            pid = rec.get("puzzle_id")
+            pid = rec.get("item_id", rec.get("puzzle_id"))
             if pid is None:
                 # The harness reports fatal setup errors as a bare
                 # {"success": false, "error": ...} line with no puzzle_id.
@@ -172,9 +192,15 @@ class Benchmark:
 
     async def _grade_one(
         self, client, semaphore, model, puzzle, round_rec, solutions_dir,
-        session_error=None,
+        session_error=None, reader=None,
     ):
-        """Grade a single solution image produced by the harness."""
+        """Grade a single solution image produced by the harness.
+
+        Tries the OpenRouter grader first. If that fails, falls back to
+        local pixel-level transcription (deterministic, free, and available
+        during every run), so a transient API error never becomes a lost
+        data point.
+        """
         # Checked for every puzzle, whatever the harness claimed, so the
         # count reflects what is actually on disk rather than what was
         # reported. A model can fail its round and still have written an
@@ -211,12 +237,42 @@ class Benchmark:
             return record
 
         output_bytes = solution_path.read_bytes()
+
+        # --- primary path: OpenRouter grader ---
+        grader_error = None
+        grader_text = None
         async with semaphore:
             try:
                 grader_text = await extract_grid(client, output_bytes, self.grader_model)
             except Exception as e:
-                record["error"] = f"grader call failed: {type(e).__name__}: {e}"
+                grader_error = f"grader call failed: {type(e).__name__}: {e}"
+
+        # --- fallback: local pixel-level transcription ---
+        local = None
+        if grader_text is None and reader is not None:
+            local = grade_image(reader, puzzle, solution_path)
+            if not local.get("read_error"):
+                # The local reader could parse the image — use its verdict.
+                record["grader_text"] = "[local fallback]"
+                record["parsed_grid"] = local.get("grid")
+                record["verdict"] = {
+                    k: v for k, v in local.items()
+                    if k not in ("source", "grid", "read_error")
+                }
+                record["verdict"]["error_type"] = (
+                    local.get("error_type", "LOCAL_FALLBACK")
+                    + (" (local fallback)" if grader_error else "")
+                )
+                if grader_error:
+                    record["grader_error"] = grader_error
                 return record
+
+        # Neither path produced a usable result.
+        if grader_text is None:
+            record["error"] = grader_error or "grader produced no response"
+            if local is not None and local.get("read_error"):
+                record["error"] += f"; local fallback: {local['read_error']}"
+            return record
 
         record["grader_text"] = grader_text
         grid = parse_grader_response(grader_text)
@@ -230,23 +286,25 @@ class Benchmark:
             record["verdict"] = verify(puzzle["puzzle"], grid)
         return record
 
-    async def run_model(self, model, puzzles, api_key, out_dir, puzzles_dir):
+    async def run_model(self, model, puzzles, api_key, out_dir, puzzles_dir,
+                        task_spec, reader=None):
         """Run one model end-to-end: a single sequential harness session,
         then concurrent grading of everything it produced."""
         safe = model.replace("/", "_").replace(":", "_")
-        solutions_dir = out_dir / "solutions" / safe
+        solutions_dir = out_dir / f"solutions-{self.harness_id}" / safe
         solutions_dir.mkdir(parents=True, exist_ok=True)
 
         print(f"  [{model}] starting sequential session over {len(puzzles)} puzzles...")
         rounds, summary, harness_error = await self._run_harness_session(
-            model, puzzles_dir, solutions_dir
+            model, puzzles_dir, solutions_dir, task_spec
         )
         if harness_error:
             print(f"  [{model}] harness error: {harness_error}")
         if summary:
+            n_rounds = summary.get("n_rounds", summary.get("n_puzzles"))
             print(
                 f"  [{model}] session done: {summary.get('n_solved')}/"
-                f"{summary.get('n_puzzles')} produced an image in "
+                f"{n_rounds} produced an image in "
                 f"{summary.get('total_elapsed', 0):.1f}s total"
             )
 
@@ -263,7 +321,7 @@ class Benchmark:
                 asyncio.create_task(
                     self._grade_one(
                         client, semaphore, model, p, rounds.get(p["id"]),
-                        solutions_dir, harness_error,
+                        solutions_dir, harness_error, reader=reader,
                     )
                 )
                 for p in puzzles
@@ -284,88 +342,9 @@ class Benchmark:
         return results, summary
 
     def summarize(self, model, results, session_summary=None):
-        n = len(results)
-        n_correct = sum(1 for r in results if r.get("verdict", {}).get("correct"))
-        n_errors = sum(1 for r in results if "error" in r)
-        elapsed = [r["elapsed"] for r in results if r.get("elapsed") is not None]
-        avg_time = sum(elapsed) / len(elapsed) if elapsed else 0.0
-
-        per_diff = {}
-        for r in results:
-            d = r.get("difficulty")
-            per_diff.setdefault(d, {"n": 0, "correct": 0})
-            per_diff[d]["n"] += 1
-            if r.get("verdict", {}).get("correct"):
-                per_diff[d]["correct"] += 1
-
-        n_images = sum(1 for r in results if r.get("output_image"))
-        tok_in = sum(r.get("input_tokens") or 0 for r in results)
-        tok_out = sum(r.get("output_tokens") or 0 for r in results)
-
-        return {
-            "model": model,
-            "n_puzzles": n,
-            "n_correct": n_correct,
-            "n_errors": n_errors,
-            # How many solution images the model actually produced. Separates
-            # "answered and got it wrong" from "never produced an answer".
-            "n_output_images": n_images,
-            "output_rate": n_images / n if n else 0.0,
-            "accuracy": n_correct / n if n else 0.0,
-            "avg_elapsed_s": avg_time,
-            "input_tokens": tok_in,
-            "output_tokens": tok_out,
-            "total_tokens": tok_in + tok_out,
-            "tokens_per_correct": (tok_in + tok_out) / n_correct if n_correct else None,
-            "per_difficulty": per_diff,
-            "learning": self._learning_stats(results),
-            "session": session_summary or {},
-        }
-
-    @staticmethod
-    def _learning_stats(results):
-        """Split warmup (round 1) from steady state (rounds 2+).
-
-        The whole point of running one persistent agent sequentially is to see
-        whether it gets faster/better after building its own infrastructure.
-        """
-        by_round = sorted(
-            (r for r in results if r.get("round") is not None),
-            key=lambda r: r["round"],
-        )
-        if not by_round:
-            return {}
-
-        warmup = by_round[0]
-        rest = by_round[1:]
-
-        def _avg(vals):
-            vals = [v for v in vals if v is not None]
-            return sum(vals) / len(vals) if vals else None
-
-        steady_time = _avg([r.get("elapsed") for r in rest])
-        warmup_time = warmup.get("elapsed")
-        speedup = (
-            warmup_time / steady_time
-            if warmup_time and steady_time and steady_time > 0
-            else None
-        )
-
-        return {
-            "warmup_elapsed_s": warmup_time,
-            "warmup_correct": bool(warmup.get("verdict", {}).get("correct")),
-            "warmup_total_tokens": warmup.get("total_tokens"),
-            "steady_state_avg_elapsed_s": steady_time,
-            "steady_state_avg_total_tokens": _avg(
-                [r.get("total_tokens") for r in rest]
-            ),
-            "steady_state_accuracy": (
-                sum(1 for r in rest if r.get("verdict", {}).get("correct")) / len(rest)
-                if rest else None
-            ),
-            "speedup_after_warmup": speedup,
-        }
-
+        """Per-model metrics. The implementation lives in get_leaderboard.py so that
+        summarize_results.py can rebuild the identical numbers from disk."""
+        return _summarize(model, results, session_summary)
 
     def _record_trial(self, summaries, puzzles_meta):
         """Merge this run's summaries into the permanent trial for this puzzle set.
@@ -430,6 +409,54 @@ class Benchmark:
                 f"{img_col}  (runs={e.get('runs', 1)})"
             )
 
+    def _model_run_order(self, models):
+        """Flat sort: least missing → never-run → open-weight → fewest failures → least expensive.
+
+        1st: Models with an existing solutions dir but *some* PNGs missing
+             (interrupted mid-run).  Sorted by least-missing first.
+        2nd: Models never run (no solutions subdir at all).
+        3rd: Everything else (all PNGs present).  Sorted by fewest failures
+             then least expensive.
+
+        Within each of the three groups the same sub-sort applies:
+          open-weight before proprietary, fewest failures first, and
+          non-expensive before expensive.
+        """
+        _cat_prio = {"open-weight": 0, "proprietary": 1}
+        n = self.n_puzzles
+
+        def _key(model):
+            safe = model.replace("/", "_").replace(":", "_")
+            sol_dir = self.output_dir / f"solutions-{self.harness_id}" / safe
+
+            expensive = 1 if model in self.expensive_models else 0
+            cat_order = _cat_prio.get(self.model_categories.get(model, ""), 2)
+
+            if not sol_dir.is_dir():
+                return (1, 0, cat_order, 0, expensive, model)
+
+            png_count = len(list(sol_dir.glob("*.png")))
+            missing = n - png_count
+
+            if missing > 0:
+                return (0, missing, cat_order, 0, expensive, model)
+
+            failed = 0
+            results_path = self.output_dir / f"{safe}.json"
+            if results_path.exists():
+                try:
+                    records = json.loads(results_path.read_text())
+                    if isinstance(records, list):
+                        failed = sum(
+                            1 for r in records
+                            if r.get("verdict", {}).get("correct") is False
+                        )
+                except (json.JSONDecodeError, OSError):
+                    pass
+            return (2, 0, cat_order, failed, expensive, model)
+
+        return sorted(models, key=_key)
+
     def run(self):
         api_key = os.environ.get("OPENROUTER_API_KEY")
         if not api_key:
@@ -460,11 +487,77 @@ class Benchmark:
         for p in puzzles:
             (img_dir / f"puzzle_{p['id']:03d}.png").write_bytes(p["image"])
 
+        # The task itself — prompts, filenames, and the verifier the agent is
+        # required to use — written where the harness can read it. Rewritten
+        # every run so an edit to task.py takes effect immediately.
+        task_spec = write_task_spec(self.output_dir / "task.json")
+        print(f"Task spec for the harness: {task_spec}")
+
+        # Calibrate the local vision reader once from the puzzle images we just
+        # rendered. If it passes its self-check it becomes the fallback grader
+        # for every model, so a transient API error never loses a data point.
+        reader = None
+        try:
+            candidate = Reader.calibrate(img_dir, puzzles_meta)
+            check = self_check(candidate, img_dir, puzzles_meta)
+            if check["all_ok"]:
+                reader = candidate
+                print(
+                    f"Local grader: calibrated and self-checked OK "
+                    f"({check['n_ok']}/{check['n_checked']} puzzles)"
+                )
+            else:
+                print(
+                    f"Local grader: FAILED self-check "
+                    f"({check['n_ok']}/{check['n_checked']} puzzles reproduced) "
+                    f"— API grader errors will NOT be rescued."
+                )
+                for c in check["checks"]:
+                    if not c["ok"]:
+                        print(f"  puzzle {c['puzzle_id']}: {c.get('error', 'mismatch')}")
+        except Exception as e:
+            print(f"Local grader: could not calibrate ({e}) — API fallback disabled.")
+
         summaries = []
-        for model in self.models:
+
+        # Sort models so the ones that need the most work run first: interrupted
+        # models with missing outputs first, then never-run models, then complete
+        # models with fewest failures first.  Every tier sorts non-expensive
+        # before expensive, then open-weight before proprietary.
+        sorted_models = self._model_run_order(self.models)
+        if sorted_models != self.models or self.expensive_models or self.model_categories:
+            missing_count = sum(
+                1 for m in sorted_models
+                if (self.output_dir / f"solutions-{self.harness_id}"
+                    / m.replace("/", "_").replace(":", "_")).is_dir()
+                and len(list((self.output_dir / f"solutions-{self.harness_id}"
+                    / m.replace("/", "_").replace(":", "_")).glob("*.png")))
+                < self.n_puzzles
+            )
+            new_count = sum(
+                1 for m in sorted_models
+                if not (self.output_dir / f"solutions-{self.harness_id}"
+                        / m.replace("/", "_").replace(":", "_")).is_dir()
+            )
+            expensive_in_run = self.expensive_models & set(sorted_models) if self.expensive_models else set()
+
+            tiers = []
+            if missing_count:
+                tiers.append(f"{missing_count} interrupted (missing runs)")
+            if new_count:
+                tiers.append(f"{new_count} never run")
+            tiers.append("complete")
+            if expensive_in_run:
+                tiers.append(f"({len(expensive_in_run)} expensive deferred)")
+            print(f"Priority order: {' > '.join(tiers)}")
+
+        for model in sorted_models:
             print(f"\n=== Running {model} via {self.harness_cmd[0]} ===")
             results, session_summary = asyncio.run(
-                self.run_model(model, puzzles, api_key, self.output_dir, img_dir)
+                self.run_model(
+                    model, puzzles, api_key, self.output_dir, img_dir, task_spec,
+                    reader=reader,
+                )
             )
 
             safe = model.replace("/", "_").replace(":", "_")
@@ -498,7 +591,7 @@ class Benchmark:
                     + (f" ({speedup:.1f}x faster)" if speedup else "")
                 )
 
-        summaries.sort(key=lambda s: (-s["accuracy"], s["avg_elapsed_s"]))
+        summaries.sort(key=_rank_key)
         (self.output_dir / "leaderboard.json").write_text(json.dumps(summaries, indent=2))
 
         print("\n=== Leaderboard (correctness, then avg time) ===")

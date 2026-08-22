@@ -1,7 +1,7 @@
 [project]
 name = "sudoku-agent-harness"
 version = "0.1.0"
-description = "Agentic Sudoku-solving harness using smolagents + OpenRouter."
+description = "General-purpose agentic harness (smolagents + OpenRouter) that runs a task given as a spec."
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [

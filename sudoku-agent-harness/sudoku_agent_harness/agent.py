@@ -1,6 +1,13 @@
-"""smolagents-based agentic Sudoku harness.
+"""smolagents-based agentic harness for file-in / file-out tasks.
 
-The harness is invoked ONCE per model with a directory of puzzles and drives
+The harness is deliberately task-agnostic: what the agent is asked to do
+arrives as a task spec (`--task`), a JSON file naming the prompts, the input
+and output filenames, and any files to install in the agent's working
+directory. Nothing about any particular task lives here, so a different
+harness can serve the same task by reading the same spec instead of
+re-implementing it.
+
+The harness is invoked ONCE per model with a directory of inputs and drives
 the agent through them sequentially, using the SAME CodeAgent and the SAME
 working directory across all rounds. `reset=False` on subsequent runs so
 that:
@@ -9,14 +16,14 @@ that:
 - the Python interpreter state persists (variables, helper functions),
 - files the agent writes to the working directory persist round-to-round.
 
-The first puzzle is framed as a warmup — the agent is told there will be N
-puzzles total and is encouraged to set up reusable infrastructure. Rounds
-2+ get a terse "next puzzle" prompt so we don't repeatedly re-inflate the
-system context.
+The first round is framed as a warmup: it gets the spec's `first_round`
+prompt, which is where a task puts its full rules and any encouragement to
+build reusable infrastructure. Later rounds get the terser `next_round`
+prompt so we don't repeatedly re-inflate the system context.
 
-Per-round stats are emitted as JSONL to stdout so the benchmarker can
-stream progress in real time. All smolagents console output — including the
-live token stream from `stream_outputs=True` — is routed to stderr so stdout
+Per-round stats are emitted as JSONL to stdout so the caller can stream
+progress in real time. All smolagents console output — including the live
+token stream from `stream_outputs=True` — is routed to stderr so stdout
 stays a clean, machine-readable JSONL channel.
 """
 import hashlib
@@ -31,146 +38,73 @@ from pathlib import Path
 from PIL import Image
 
 
-VISION_READING_SECTION = """## Reading the puzzle
+# Placeholders a task prompt may use; everything else is literal text.
+# Substituted by plain replacement, never str.format, so a prompt containing
+# braces (a JSON example, a dict literal) cannot break a run.
+PROMPT_PLACEHOLDERS = ("round", "n_rounds", "input_filename", "output_filename")
 
-**The puzzle image is attached to this message — look at it directly.** The same image is on disk as `input.png` in your working directory.
+DEFAULT_INPUT_FILENAME = "input.png"
+DEFAULT_OUTPUT_FILENAME = "output.png"
+DEFAULT_INPUT_GLOB = "*.png"
 
-Read the clue digits and their positions from the image you were shown. Prefer this over writing OCR or pixel-inspection code — you can already see the digits, and writing extraction code costs most of a round. Only fall back to reading them with code if you genuinely cannot make out the image; such code may classify glyphs, but must never use Sudoku rules to decide or correct a reading.
 
-Use `input.png` on disk for what vision can't give you precisely: grid geometry for rendering (image dimensions, grid bounds, cell size), and as the base image to draw onto.
+def load_task(path) -> dict:
+    """Read a task spec, filling in defaults for everything optional.
 
-Start by transcribing the grid into text in your reasoning, using `.` for empty cells, and re-check that transcription against the image before solving. A misread clue wastes the whole round.
-"""
+    Required: `prompts.first_round` and `prompts.next_round`, each with a
+    `vision` and/or `text_only` variant. A task that only supplies one variant
+    gets it used for both, which is right for a task whose wording doesn't
+    depend on whether the model can see.
+    """
+    path = Path(path)
+    try:
+        spec = json.loads(path.read_text())
+    except (json.JSONDecodeError, OSError) as e:
+        raise ValueError(f"could not read task spec {path}: {e}") from e
+    if not isinstance(spec, dict):
+        raise ValueError(f"task spec {path} is not a JSON object")
 
-TEXT_ONLY_READING_SECTION = """## Reading the puzzle
+    prompts = spec.get("prompts")
+    if not isinstance(prompts, dict) or not prompts.get("first_round"):
+        raise ValueError(
+            f"task spec {path} needs prompts.first_round (and normally "
+            f"prompts.next_round)"
+        )
+    for phase in ("first_round", "next_round"):
+        variants = prompts.get(phase) or prompts["first_round"]
+        if isinstance(variants, str):
+            variants = {"vision": variants, "text_only": variants}
+        if not variants.get("vision") and not variants.get("text_only"):
+            raise ValueError(
+                f"task spec {path}: prompts.{phase} has neither a vision nor a "
+                f"text_only variant"
+            )
+        prompts[phase] = variants
 
-**You cannot see images, so no image is attached. The puzzle is only available as the file `input.png` in your working directory. Working out what digits it contains is part of your job.**
+    spec.setdefault("task", path.stem)
+    spec.setdefault("input_filename", DEFAULT_INPUT_FILENAME)
+    spec.setdefault("output_filename", DEFAULT_OUTPUT_FILENAME)
+    spec.setdefault("input_glob", DEFAULT_INPUT_GLOB)
+    spec.setdefault("assets", [])
+    return spec
 
-Write code to extract the clues from those pixels. This is expected and fully allowed — for you it is the only way in. Some things that help:
 
-- `Image`, `ImageDraw` and `ImageFont` from Pillow are already imported and ready to use. OCR libraries are probably NOT installed; check, and be ready to do without.
-- The grid is a black-on-white 9x9 with thick lines every 3 cells. Find the grid by locating the dark rows and columns of pixels, then divide the interior into 9 equal cells. Do not assume the grid starts at pixel 0 — there is a margin.
-- A cell is empty if its interior is uniformly light. Only non-empty cells need a digit identified.
-- To identify a digit, render each of `1`-`9` yourself with Pillow at the cell size and compare against the cell bitmap, taking the closest match. Trying a few font sizes and picking the best score is more reliable than guessing the size. This is ordinary template matching and is a perfectly good approach here.
-- Print the grid you extracted and check it looks like a plausible Sudoku (no digit repeated in any row, column, or box among the clues). If a clue looks misread, fix your reader.
-
-Your extraction code may look at pixels and classify glyphs. It must NOT use Sudoku rules to decide or correct a reading, and it must not go on to solve anything — the moment code starts choosing digits for empty cells, it is a solver.
-
-Once you have the clues, write the grid out in your reasoning using `.` for empty cells, and solve from there. A misread clue wastes the whole round, so it is worth checking the transcription before you start deducing.
-"""
-
-WARMUP_PROMPT = """You are about to solve a SERIES of {n_puzzles} 9x9 Sudoku puzzles in a single session. This is puzzle 1 of {n_puzzles} — a warmup / practice round.
-
-This is a test of YOUR reasoning. A program that solves Sudoku is trivial to write and proves nothing; the entire point of this benchmark is whether you can do the deductions yourself.
-
-## The one rule that matters
-
-**No code may look at, test, or reason about Sudoku digits or constraints. Ever.**
-
-Code is for PIXELS ONLY: reading the image, and drawing the output image. Every decision about which digit goes in which cell must happen in your own written reasoning.
-
-Specifically forbidden — all of these count as cheating, no matter how they are framed:
-
-- A solver, backtracker, brute-forcer, or recursive search.
-- Constraint propagation, candidate elimination, or pencil-mark computation in code.
-- Code that checks whether a row/column/box is valid, has duplicates, or is complete. Do not write your own checker, assertion script, or "sanity check" over the digits — a checker you control becomes a search loop. A verifier is provided; see below.
-- Importing, installing, or calling any Sudoku library, and looking up the answer.
-- Asking another model or service to solve it.
-
-Do not try to find a reading of this rule that permits your script. If a piece of code takes digits as input, it is forbidden. The only arrays your code should ever touch are pixel arrays.
-
-Your working directory is archived and inspected after the run. Writing a solver and reporting that you "solved it by hand" is the worst possible outcome — far worse than failing honestly.
-
-If you cannot finish a puzzle by reasoning, say so and return "IMPOSSIBLE". An honest failure is a legitimate result.
-
-{reading_section}
-## How to solve it
-
-Use `rNcN` notation (r1c1 is top-left, r9c9 bottom-right). Work these techniques in order — always exhaust the cheap ones before reaching for an expensive one:
-
-1. **Hidden singles (start here — usually the most productive).** For each digit 1-9, take one box, row, or column at a time: if the digit can legally go in only one empty cell of that unit, it goes there. Scanning digit-by-digit across all 27 units finds most placements in easy and medium puzzles.
-2. **Cross-hatching.** For a given digit, mentally strike out every row and column that already contains it. In any box, the digit must live in the cells that survive; if only one survives, place it.
-3. **Naked singles.** For a single empty cell, list which digits its row, column, and box do NOT already contain. If exactly one digit remains, place it.
-4. **Keep candidate lists (pencil marks) once scanning dries up.** Write out the possible digits per empty cell in your reasoning and maintain them as you place digits. This is what makes the harder techniques visible.
-5. **Locked candidates.** If within a box a digit's only possible cells all sit in one row (or column), that digit can be eliminated from the rest of that row (or column) — and vice versa.
-6. **Naked pairs/triples.** If two cells in a unit have exactly the same two candidates, those digits belong to those two cells; remove them from every other cell in the unit. Same idea for three cells sharing three candidates.
-7. **Hidden pairs/triples.** If two digits can only go in the same two cells of a unit, those cells hold exactly those digits; strip their other candidates.
-8. **X-Wing and similar** only for genuinely hard grids, after the above stop yielding.
-
-Practical advice:
-
-- Start with the digit that already appears most often on the board — it is the most constrained and places fastest.
-- After every placement, immediately update the affected row, column, and box; a stale candidate list causes contradictions later.
-- Re-scan for hidden singles each time you place a few digits. Puzzles usually re-open.
-- Never guess. If you are stuck, you have missed something — re-run step 1 digit by digit across all 27 units rather than branching.
-- Before rendering, sanity-check by eye that each row, column, and 3x3 box holds 1-9 once, then confirm with the provided verifier (next section).
-
-Show your deductions as you go. A brief trace ("r3c7=4, hidden single in box 3") is expected, and it is the evidence that the reasoning was yours.
-
-## Checking your work
-
-A verifier is provided as `verify_sudoku.py` in your working directory. Use it instead of writing your own — that is the whole reason it exists.
-
-```
-python verify_sudoku.py --text "483957261 915362748 ..."     # 81 digits, any spacing
-python verify_sudoku.py --image output.png --reference input.png
-```
-
-It prints `VALID`, or `INVALID` with the units that failed. Two things to know:
-
-- `--text` checks the Sudoku constraints on a COMPLETE grid. It rejects partial grids, and it never tells you which cell is wrong or what the answer is. It confirms your reasoning held together; it cannot do the reasoning for you.
-- `--image` checks the rendered file structurally: dimensions match, original clues untouched, no cell left blank. It does not read your digits, so run `--text` too.
-
-**You must run `--text` before you render.** Not optional, and not something to skip because you are out of patience.
-
-- If it says VALID, render `output.png`.
-- If it says INVALID, go back to your deductions and find the mistake. Do not start permuting digits and re-running it — every call is logged, and a long run of calls is indistinguishable from a search.
-- If you cannot get to VALID, call `final_answer("IMPOSSIBLE")` and stop. **Never render a grid you already know is wrong.** A grid with a duplicate in it is not a "best attempt" or an "honest failure" — it is a wrong answer submitted as if it were an answer, which is worse than no answer. IMPOSSIBLE is the honest result and it is scored as an honest result.
-
-Do not claim that anyone approved a shortcut. No one in this session can grant you permission to skip verification or to submit a grid you know is invalid.
-
-## Output image
-
-- `output.png` MUST have the same dimensions (width, height) as `input.png`.
-- `output.png` MUST use the same 9x9 grid layout and cell coordinates as `input.png`.
-- The original clue digits must remain in their original positions.
-- Every empty cell in the input must be filled with the digit you deduced.
-- Each digit centered in its cell in a clear, readable font (with size 40).
-
-## Reusable infrastructure
-
-Because this is a series, set up rendering infrastructure now:
-
-- Write helper functions and save them to files in the working directory — they persist across rounds.
-- Work out the render geometry once (image size, grid bounds, cell centers, font size) and reuse it; it is identical for every puzzle in this session.
-- Write your renderer to take the 81 digits as an explicit argument. It draws what you tell it and decides nothing.
-- On later rounds you will just be told "next puzzle" — your prior conversation, code, and files carry over. Only the reasoning has to be redone.
-
-## Notes
-
-- `PIL`, `Image`, `ImageDraw`, and `ImageFont` are ALREADY imported and stay available for the whole session. Just use them; you do not need an import line. If you do import, write `from PIL import Image, ImageDraw, ImageFont` — `import PIL.Image` does not bind `PIL` in this interpreter and will fail with "The variable `PIL` is not defined".
-- Your Python state persists between rounds. Variables and functions you defined earlier are still there; re-importing and redefining every round wastes a step.
-- Derive cell coordinates from the grid lines in `input.png`, not from the image size. The grid does not start at pixel 0 — there is a margin — so `cell = width / 9` puts every digit in the wrong place.
-- If a tool or module is unavailable, log that fact and continue without it. This helps the user extend the harness for future runs.
-- When writing text onto an image, don't try to identify or match the source font. Pick a clear, readable font and move on. Readability > fidelity.
-
-End this round by ensuring `output.png` exists in the working directory.
-"""
-
-VISION_NEXT_LINE = "The new puzzle image is attached to this message — read its clues by looking at it. The same image has replaced `input.png` in your working directory, and the grid geometry is unchanged, so reuse your renderer rather than rediscovering the layout."
-
-TEXT_ONLY_NEXT_LINE = "A new puzzle has replaced `input.png` in your working directory. No image is attached — run the extraction code you already wrote to read its clues. The grid geometry is unchanged, so reuse both your reader and your renderer rather than rediscovering the layout."
-
-NEXT_PUZZLE_PROMPT = """Next puzzle (round {round} of {n_puzzles}).
-
-{next_reading_line}
-
-Same rule as before: code draws pixels, you do all the Sudoku reasoning. No solver, no candidate elimination in code, and don't write your own checker.
-
-Run `python verify_sudoku.py --text "..."` before rendering. If it won't come back VALID, answer "IMPOSSIBLE" rather than rendering a grid you know is wrong. Your imports, variables, and helper functions from earlier rounds are all still loaded.
-
-Save the solution as `output.png`.
-"""
+def build_prompt(spec: dict, *, round_number: int, n_rounds: int,
+                 first: bool, with_images: bool) -> str:
+    """Pick the prompt for this round and fill in the generic placeholders."""
+    variants = spec["prompts"]["first_round" if first else "next_round"]
+    template = variants.get("vision" if with_images else "text_only") or (
+        variants.get("text_only") or variants.get("vision")
+    )
+    values = {
+        "round": str(round_number),
+        "n_rounds": str(n_rounds),
+        "input_filename": spec["input_filename"],
+        "output_filename": spec["output_filename"],
+    }
+    for key in PROMPT_PLACEHOLDERS:
+        template = template.replace("{" + key + "}", values[key])
+    return template
 
 
 def default_archive_dir() -> Path:
@@ -179,20 +113,19 @@ def default_archive_dir() -> Path:
 
 
 STATE_FILENAME = ".harness_state.json"
-VERIFIER_FILENAME = "verify_sudoku.py"
 
 
 def _drop_stale_images(agent) -> int:
     """Strip images from prior rounds out of the agent's memory.
 
     The session is deliberately persistent (`reset=False`), so every round's
-    puzzle image stays in the conversation. By round 9 the request carries 9
+    input image stays in the conversation. By round 9 the request carries 9
     images and providers start refusing it outright — DeepInfra caps at 8 —
     and long before that the image tokens dwarf everything else.
 
-    Only the pixels are dropped. The agent has already transcribed each
-    puzzle into text in its reasoning, and all of that text is untouched, so
-    it keeps the session memory the benchmark is trying to measure.
+    Only the pixels are dropped. Whatever the agent wrote about each input in
+    its reasoning is untouched, so it keeps the session memory the benchmark
+    is trying to measure.
 
     Call immediately before `agent.run()`: every image still in memory at
     that point belongs to an earlier round. Returns how many were dropped.
@@ -247,40 +180,44 @@ def _preload_imaging(agent) -> None:
         print(f"[harness] could not preload PIL: {e!r}", file=sys.stderr)
 
 
-def _install_verifier(td: Path) -> bool:
-    """Drop the shipped verifier into the agent's working directory.
+def _install_assets(td: Path, assets) -> int:
+    """Copy the task's files into the agent's working directory.
 
-    The agent is forbidden from writing constraint-checking code, so it is
-    given one. Best-effort: if the copy fails the round still runs, just
-    without the safety net.
+    Whatever a task wants on hand — a verifier it requires the agent to use, a
+    reference document, a helper script. The harness neither knows nor cares
+    what they are. Best-effort per file: a missing asset is reported and the
+    session continues, since a round without the helper still produces a
+    result worth recording.
     """
-    src = Path(__file__).resolve().parent / VERIFIER_FILENAME
-    try:
-        shutil.copy(src, td / VERIFIER_FILENAME)
-        return True
-    except OSError as e:
-        print(f"[harness] could not install {VERIFIER_FILENAME}: {e}", file=sys.stderr)
-        return False
+    installed = 0
+    for asset in assets or []:
+        src = Path(asset)
+        try:
+            shutil.copy(src, td / src.name)
+            installed += 1
+        except OSError as e:
+            print(f"[harness] could not install asset {src}: {e}", file=sys.stderr)
+    return installed
 
 
-def _puzzle_set_fingerprint(puzzle_paths: list[Path]) -> str:
-    """Content hash of the whole puzzle set.
+def _input_set_fingerprint(input_paths: list[Path]) -> str:
+    """Content hash of the whole input set.
 
-    Resuming is only safe against the identical set of puzzles. Hashing the
-    file contents (not just names) means regenerating puzzles with a new seed
-    invalidates the state even though the filenames are unchanged.
+    Resuming is only safe against the identical set of inputs. Hashing the
+    file contents (not just names) means regenerating the inputs invalidates
+    the state even though the filenames are unchanged.
     """
     h = hashlib.sha256()
-    for p in sorted(puzzle_paths, key=lambda x: x.name):
+    for p in sorted(input_paths, key=lambda x: x.name):
         h.update(p.name.encode())
         h.update(hashlib.sha256(p.read_bytes()).digest())
     return h.hexdigest()
 
 
 def _load_state(output_dir: Path, model_id: str, fingerprint: str) -> dict:
-    """Return {puzzle_name: round_record} for rounds already completed.
+    """Return {item_name: round_record} for rounds already completed.
 
-    Empty if there is no state, it belongs to another model, or the puzzle set
+    Empty if there is no state, it belongs to another model, or the input set
     has changed since it was written.
     """
     state_path = output_dir / STATE_FILENAME
@@ -292,9 +229,9 @@ def _load_state(output_dir: Path, model_id: str, fingerprint: str) -> dict:
         print(f"[harness] ignoring unreadable state file: {e}", file=sys.stderr)
         return {}
 
-    if state.get("puzzle_set") != fingerprint:
+    if _state_fingerprint(state) != fingerprint:
         print(
-            "[harness] puzzle set changed since last run - ignoring saved state "
+            "[harness] input set changed since last run - ignoring saved state "
             "and starting fresh.",
             file=sys.stderr,
         )
@@ -309,14 +246,25 @@ def _load_state(output_dir: Path, model_id: str, fingerprint: str) -> dict:
 
     done = {}
     for rec in state.get("rounds", []):
-        name = rec.get("puzzle_name")
+        name = _record_name(rec)
         # Only trust a record whose solution image is actually still there.
         if name and rec.get("success") and (output_dir / name).exists():
             done[name] = rec
     return done
 
 
-def _save_state(output_dir: Path, model_id: str, fingerprint: str, rounds: list) -> None:
+def _state_fingerprint(state: dict):
+    """Input-set hash from a state file, accepting the pre-rename key."""
+    return state.get("input_set", state.get("puzzle_set"))
+
+
+def _record_name(record: dict):
+    """Input filename from a round record, accepting the pre-rename key."""
+    return record.get("item_name") or record.get("puzzle_name")
+
+
+def _save_state(output_dir: Path, model_id: str, fingerprint: str, rounds: list,
+                task_name: str = "") -> None:
     """Persist completed rounds so an interrupted run can resume.
 
     Written atomically so a Ctrl+C mid-write can't leave a corrupt file.
@@ -327,7 +275,12 @@ def _save_state(output_dir: Path, model_id: str, fingerprint: str, rounds: list)
         tmp = state_path.with_suffix(".tmp")
         tmp.write_text(
             json.dumps(
-                {"model": model_id, "puzzle_set": fingerprint, "rounds": rounds},
+                {
+                    "model": model_id,
+                    "task": task_name,
+                    "input_set": fingerprint,
+                    "rounds": rounds,
+                },
                 indent=2,
             )
         )
@@ -354,12 +307,15 @@ def _safe_model_name(model_id: str) -> str:
     return model_id.replace("/", "_").replace(":", "_")
 
 
-def _archive_working_dir(td: Path, archive_dir: Path, model_id: str, rounds: list) -> Path | None:
-    """Snapshot the agent's working directory for post-hoc cheat inspection.
+def _archive_working_dir(td: Path, archive_dir: Path, model_id: str, rounds: list,
+                         ignore_names=("input.png", "output.png")) -> Path | None:
+    """Snapshot the agent's working directory for post-hoc inspection.
 
     Copies every file the agent left behind — its own scripts especially —
     plus a session.json of the round records. Any previous archive for this
     model is replaced so stale runs can't be mistaken for the current one.
+    This is the audit trail for whatever the task forbids: the scripts are
+    preserved so a caller can check how the answer was actually produced.
 
     Never raises: losing the archive must not fail an otherwise good session.
     """
@@ -368,11 +324,11 @@ def _archive_working_dir(td: Path, archive_dir: Path, model_id: str, rounds: lis
         if dest.exists():
             shutil.rmtree(dest)
         dest.parent.mkdir(parents=True, exist_ok=True)
-        # input.png/output.png are just the current round's scratch copies;
-        # the puzzles and solutions are already saved by the benchmarker.
+        # The round's input/output files are just scratch copies; the caller
+        # already has both the inputs it supplied and the outputs it collected.
         shutil.copytree(
             td, dest,
-            ignore=shutil.ignore_patterns("input.png", "output.png", "__pycache__"),
+            ignore=shutil.ignore_patterns(*ignore_names, "__pycache__"),
         )
         (dest / "session.json").write_text(
             json.dumps({"model": model_id, "rounds": rounds}, indent=2)
@@ -412,33 +368,41 @@ class _RoundDeadline:
 
 def run(
     model_id: str,
-    puzzles_dir: Path,
+    inputs_dir: Path,
     output_dir: Path,
+    task: dict | str | Path,
     timeout: int,
     archive_dir: Path | None = None,
     fresh: bool = False,
     send_images: bool = True,
 ) -> dict:
-    """Run the agentic harness across a whole directory of puzzles.
+    """Run the agentic harness across a whole directory of task inputs.
 
     Args:
         model_id: OpenRouter model ID (e.g. "openai/gpt-4o").
-        puzzles_dir: Directory containing puzzle_NNN.png files.
-        output_dir: Directory where output_NNN.png files will be written.
+        inputs_dir: Directory of input files, one per round, taken in sorted
+            order. Which files count is the task's `input_glob`.
+        output_dir: Directory where each round's output is collected, under
+            the same filename as its input.
+        task: The task spec — a dict, or a path to the JSON file holding one.
+            This is what makes the run a Sudoku benchmark, or anything else:
+            the prompts, the filenames, and the files to install in the
+            working directory. See `load_task`.
         timeout: Per-round soft timeout in seconds.
         archive_dir: Where to copy the agent's working directory when the
             session ends, under `<archive_dir>/<model>/`. Defaults to
             `archive/` at the harness repo root. Pass an explicit path to
             relocate it. This is the audit trail: every script the agent
-            wrote is preserved so you can check whether it cheated (e.g.
-            by writing a Sudoku solver, which the task prompt forbids).
-        fresh: Ignore any saved state and re-solve every puzzle. By default a
-            run resumes: puzzles already solved for this model against this
-            exact puzzle set are skipped and their stored records replayed.
-        send_images: Attach the puzzle image to each round. Left on by default;
-            if the model turns out to reject images the harness detects that on
-            the first round and drops to text-only automatically. Pass False to
-            skip the failed attempt when you already know the model is
+            wrote is preserved, so a caller can check how the answers were
+            actually produced against whatever its task forbids.
+        fresh: Ignore any saved state and redo every round. By default a run
+            resumes: rounds already completed for this model against this
+            exact input set are skipped and their stored records replayed.
+        send_images: Attach each round's input image to the message. Left on by
+            default; if the model turns out to reject images the harness
+            detects that on the first round and drops to text-only
+            automatically, switching to the task's `text_only` prompts. Pass
+            False to skip the failed attempt when you already know the model is
             text-only.
 
     Returns:
@@ -453,25 +417,30 @@ def run(
     if not api_key:
         raise RuntimeError("OPENROUTER_API_KEY not set (check .env file).")
 
-    puzzles_dir = Path(puzzles_dir).resolve()
-    output_dir = Path(output_dir).resolve()
-    if not puzzles_dir.exists():
-        raise FileNotFoundError(f"Puzzles directory not found: {puzzles_dir}")
+    spec = task if isinstance(task, dict) else load_task(task)
+    task_name = spec.get("task", "")
+    input_name = spec["input_filename"]
+    output_name = spec["output_filename"]
 
-    puzzle_paths = sorted(puzzles_dir.glob("puzzle_*.png"))
-    if not puzzle_paths:
+    inputs_dir = Path(inputs_dir).resolve()
+    output_dir = Path(output_dir).resolve()
+    if not inputs_dir.exists():
+        raise FileNotFoundError(f"Inputs directory not found: {inputs_dir}")
+
+    input_paths = sorted(inputs_dir.glob(spec["input_glob"]))
+    if not input_paths:
         raise FileNotFoundError(
-            f"No puzzle_*.png files found under {puzzles_dir}"
+            f"No {spec['input_glob']} files found under {inputs_dir}"
         )
 
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    fingerprint = _puzzle_set_fingerprint(puzzle_paths)
+    fingerprint = _input_set_fingerprint(input_paths)
     completed = {} if fresh else _load_state(output_dir, model_id, fingerprint)
     if completed:
         print(
-            f"[harness] resuming: {len(completed)}/{len(puzzle_paths)} puzzles "
-            f"already solved for {model_id}. Note the agent starts fresh, so it "
+            f"[harness] resuming: {len(completed)}/{len(input_paths)} round(s) "
+            f"already done for {model_id}. Note the agent starts fresh, so it "
             f"cannot reuse infrastructure the interrupted run built.",
             file=sys.stderr,
         )
@@ -537,56 +506,53 @@ def run(
     # first one gets the warmup prompt and resets the agent, because on resume
     # the agent has no memory of the interrupted run.
     executed = 0
-    with tempfile.TemporaryDirectory(prefix="sudoku-harness-") as td:
+    with tempfile.TemporaryDirectory(prefix="agent-harness-") as td:
         td = Path(td)
         cwd = os.getcwd()
-        _install_verifier(td)
+        n_assets = _install_assets(td, spec.get("assets"))
+        if n_assets:
+            print(
+                f"[harness] installed {n_assets} task asset(s) into the working dir",
+                file=sys.stderr,
+            )
         os.chdir(td)
         sys.stdout = sys.stderr
         try:
-            n_puzzles = len(puzzle_paths)
-            for i, puzzle_path in enumerate(puzzle_paths):
-                # Already solved against this exact puzzle set: replay the
-                # stored record so the caller still sees every puzzle.
-                prior = completed.get(puzzle_path.name)
+            n_rounds = len(input_paths)
+            for i, input_path in enumerate(input_paths):
+                # Already done against this exact input set: replay the stored
+                # record so the caller still sees every round.
+                prior = completed.get(input_path.name)
                 if prior is not None:
                     record = {**prior, "resumed": True}
                     rounds.append(record)
                     jsonl_out.write(json.dumps(record) + "\n")
                     jsonl_out.flush()
                     print(
-                        f"[harness] round {i + 1}/{n_puzzles}: "
-                        f"{puzzle_path.name} already solved, skipping",
+                        f"[harness] round {i + 1}/{n_rounds}: "
+                        f"{input_path.name} already done, skipping",
                         file=sys.stderr,
                         flush=True,
                     )
                     continue
 
-                # Refresh input.png with the current round's puzzle.
-                input_dst = td / "input.png"
-                output_src = td / "output.png"
+                # Hand the agent this round's input under the task's name.
+                input_dst = td / input_name
+                output_src = td / output_name
                 if output_src.exists():
                     output_src.unlink()
-                shutil.copy(puzzle_path, input_dst)
+                shutil.copy(input_path, input_dst)
 
-                puzzle_id = _puzzle_id_from_name(puzzle_path)
+                item_id = _item_id_from_name(input_path)
                 first_executed = executed == 0
 
                 def _build_prompt(with_images):
-                    if first_executed:
-                        return WARMUP_PROMPT.format(
-                            n_puzzles=n_puzzles,
-                            reading_section=(
-                                VISION_READING_SECTION if with_images
-                                else TEXT_ONLY_READING_SECTION
-                            ),
-                        )
-                    return NEXT_PUZZLE_PROMPT.format(
-                        round=i + 1,
-                        n_puzzles=n_puzzles,
-                        next_reading_line=(
-                            VISION_NEXT_LINE if with_images else TEXT_ONLY_NEXT_LINE
-                        ),
+                    return build_prompt(
+                        spec,
+                        round_number=i + 1,
+                        n_rounds=n_rounds,
+                        first=first_executed,
+                        with_images=with_images,
                     )
 
                 prompt = _build_prompt(send_images)
@@ -600,8 +566,8 @@ def run(
                 error = None
                 final_answer = None
                 print(
-                    f"\n===== Round {i + 1}/{n_puzzles}: "
-                    f"{puzzle_path.name} =====",
+                    f"\n===== Round {i + 1}/{n_rounds}: "
+                    f"{input_path.name} =====",
                     file=sys.stderr,
                     flush=True,
                 )
@@ -629,12 +595,13 @@ def run(
                         if not (send_images and _is_no_image_support_error(e)):
                             raise
                         # Text-only model: drop the attachment for the rest of
-                        # the session and retry this round telling it to read
-                        # input.png itself.
+                        # the session and retry this round with the task's
+                        # text-only prompt, which tells the agent to read the
+                        # input file itself.
                         send_images = False
                         print(
-                            "[harness] model cannot accept images; switching to "
-                            "text-only mode (agent must read input.png itself)",
+                            f"[harness] model cannot accept images; switching to "
+                            f"text-only mode (agent must read {input_name} itself)",
                             file=sys.stderr,
                             flush=True,
                         )
@@ -646,7 +613,7 @@ def run(
                     # Let everything already finished persist, then stop.
                     interrupted = True
                     print(
-                        f"\n[harness] interrupted during {puzzle_path.name}; "
+                        f"\n[harness] interrupted during {input_path.name}; "
                         f"{len(rounds)} completed round(s) saved. Re-run the "
                         f"same command to resume.",
                         file=sys.stderr,
@@ -658,7 +625,7 @@ def run(
                 executed += 1
                 elapsed = time.perf_counter() - start
 
-                dest = output_dir / puzzle_path.name
+                dest = output_dir / input_path.name
                 success = output_src.exists() and error is None
                 if success:
                     shutil.move(str(output_src), str(dest))
@@ -668,8 +635,8 @@ def run(
                 round_out = max(0, out_after - tokens_before[1])
 
                 record = {
-                    "puzzle_id": puzzle_id,
-                    "puzzle_name": puzzle_path.name,
+                    "item_id": item_id,
+                    "item_name": input_path.name,
                     "round": i + 1,
                     "success": success,
                     "elapsed": elapsed,
@@ -681,7 +648,9 @@ def run(
                 if error is not None:
                     record["error"] = error
                 elif not success:
-                    record["error"] = "Agent finished without producing output.png"
+                    record["error"] = (
+                        f"Agent finished without producing {output_name}"
+                    )
 
                 rounds.append(record)
                 # Streaming stats: one JSONL line per round as it completes.
@@ -690,7 +659,7 @@ def run(
                 jsonl_out.flush()
                 # Persist after every round so Ctrl+C at any point keeps all
                 # the work done so far.
-                _save_state(output_dir, model_id, fingerprint, rounds)
+                _save_state(output_dir, model_id, fingerprint, rounds, task_name)
         except KeyboardInterrupt:
             # Ctrl+C outside agent.run() (e.g. while copying files).
             interrupted = True
@@ -700,7 +669,7 @@ def run(
                 file=sys.stderr,
             )
         finally:
-            _save_state(output_dir, model_id, fingerprint, rounds)
+            _save_state(output_dir, model_id, fingerprint, rounds, task_name)
             sys.stdout = jsonl_out
             os.chdir(cwd)
             # Must happen before the TemporaryDirectory context exits and
@@ -711,12 +680,13 @@ def run(
                 archive_dir if archive_dir is not None else default_archive_dir(),
                 model_id,
                 rounds,
+                ignore_names=(input_name, output_name),
             )
             if archived_to is not None:
                 print(f"[harness] archived working dir -> {archived_to}", file=sys.stderr)
 
     return {
-        # An interrupted session did not cover the puzzle set, so it is not a
+        # An interrupted session did not cover the input set, so it is not a
         # successful run even though the rounds it did finish are saved.
         "success": not interrupted,
         "interrupted": interrupted,
@@ -730,8 +700,12 @@ def run(
     }
 
 
-def _puzzle_id_from_name(path: Path) -> int | None:
-    """Extract NNN from puzzle_NNN.png; None if the filename doesn't match."""
+def _item_id_from_name(path: Path) -> int | None:
+    """Extract the trailing number from e.g. `puzzle_042.png`.
+
+    Lets a caller correlate a round with the input it supplied without the
+    harness knowing what the inputs are. None if the name has no such suffix.
+    """
     stem = path.stem  # e.g. "puzzle_042"
     parts = stem.rsplit("_", 1)
     if len(parts) == 2 and parts[1].isdigit():

@@ -1,9 +1,12 @@
-"""CLI entrypoint for sudoku-agent-harness.
+"""CLI entrypoint for the agent harness.
 
 The harness is invoked ONCE per model and drives a persistent CodeAgent
-through every puzzle in `--puzzles-dir` sequentially. Per-round stats are
-emitted as JSONL to stdout as each round finishes (so callers can stream
-progress). A final summary JSON line is printed at the end.
+through every input in `--inputs-dir` sequentially. What it asks the agent to
+do comes entirely from `--task`: the harness carries no task of its own, so
+the same spec can be handed to a different harness without re-writing the
+task. Per-round stats are emitted as JSONL to stdout as each round finishes
+(so callers can stream progress). A final summary JSON line is printed at the
+end.
 """
 import argparse
 import json
@@ -32,19 +35,30 @@ def main():
     _load_env()
 
     parser = argparse.ArgumentParser(
-        description="Agentic Sudoku harness (smolagents + OpenRouter). "
-        "Runs one persistent agent across every puzzle in --puzzles-dir.",
+        description="Agentic file-in/file-out harness (smolagents + OpenRouter). "
+        "Runs one persistent agent across every input in --inputs-dir, doing "
+        "whatever --task says.",
     )
     parser.add_argument("--model", required=True, help="OpenRouter model ID.")
     parser.add_argument(
-        "--puzzles-dir",
+        "--task",
         required=True,
-        help="Directory containing puzzle_NNN.png files.",
+        help="Path to the task spec: a JSON file with the prompts, the input "
+        "and output filenames, and any files to install in the agent's "
+        "working directory. The task lives with whoever defines it, not here.",
+    )
+    parser.add_argument(
+        "--inputs-dir",
+        "--puzzles-dir",
+        dest="inputs_dir",
+        required=True,
+        help="Directory of input files, one per round, in sorted order.",
     )
     parser.add_argument(
         "--output-dir",
         required=True,
-        help="Directory where solution PNGs will be written (same filenames as inputs).",
+        help="Directory where each round's output is written (same filename as "
+        "its input).",
     )
     parser.add_argument(
         "--timeout",
@@ -63,16 +77,17 @@ def main():
     parser.add_argument(
         "--no-image",
         action="store_true",
-        help="Don't attach the puzzle image; tell the agent to read input.png "
-        "itself. Only needed to skip the one failed request for a model already "
-        "known to be text-only — otherwise this is detected automatically.",
+        help="Don't attach the input image; use the task's text-only prompts, "
+        "which tell the agent to read the input file itself. Only needed to "
+        "skip the one failed request for a model already known to be "
+        "text-only — otherwise this is detected automatically.",
     )
     parser.add_argument(
         "--fresh",
         action="store_true",
-        help="Ignore saved state and re-solve every puzzle. By default a run "
-        "resumes: puzzles already solved for this model against this exact "
-        "puzzle set are skipped, so an interrupted run can be restarted.",
+        help="Ignore saved state and redo every round. By default a run "
+        "resumes: rounds already completed for this model against this exact "
+        "input set are skipped, so an interrupted run can be restarted.",
     )
     args = parser.parse_args()
 
@@ -82,8 +97,9 @@ def main():
     try:
         result = run(
             args.model,
-            Path(args.puzzles_dir),
+            Path(args.inputs_dir),
             Path(args.output_dir),
+            task=Path(args.task),
             timeout=args.timeout,
             archive_dir=Path(args.archive_dir) if args.archive_dir else None,
             fresh=args.fresh,
@@ -97,7 +113,9 @@ def main():
     # Emit a final summary line the caller can distinguish by the `summary` key.
     summary = {
         "summary": True,
+        # Named for the caller's benefit: one round per input file.
         "n_puzzles": len(result["rounds"]),
+        "n_rounds": len(result["rounds"]),
         "n_solved": result["n_solved"],
         "n_resumed": result.get("n_resumed", 0),
         "interrupted": result.get("interrupted", False),

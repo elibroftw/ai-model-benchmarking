@@ -70,4 +70,7 @@ so the agent can author its own when it hits a task nothing covers.
   that exercises harnesses like this one.
 - [`sudoku-agent-harness`](../sudoku-agent-harness/) — smolagents-based
   harness. Once `general-agent` is mature enough, we may wrap it as a
-  drop-in replacement matching the same subprocess CLI contract.
+  drop-in replacement matching the same subprocess CLI contract. That contract
+  passes the task in as a JSON spec (`--task`: prompts, input/output
+  filenames, files to install in the working directory), so the wrapper is
+  plumbing only — no benchmark-specific prompts to copy over.

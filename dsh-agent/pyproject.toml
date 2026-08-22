@@ -1,0 +1,21 @@
+[project]
+name = "dsh-agent"
+version = "0.1.0"
+description = "Benchmark harness that delegates to a running DSH instance via its HTTP API."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "httpx>=0.28",
+    "pillow>=10.0",
+    "python-dotenv>=1.0",
+]
+
+[project.scripts]
+dsh-agent = "dsh_agent.__main__:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["dsh_agent"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"

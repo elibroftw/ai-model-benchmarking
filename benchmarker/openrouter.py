@@ -1,6 +1,8 @@
 """Minimal OpenRouter client used by the grader (LLM-as-grader for output images)."""
 import base64
 
+import httpx
+
 CHAT_URL = "https://openrouter.ai/api/v1/chat/completions"
 
 GRADER_PROMPT = """You are looking at a rendered image of a 9x9 Sudoku grid.
@@ -37,8 +39,21 @@ async def extract_grid(client, image_bytes, grader_model, timeout=120):
             },
         ],
     }
-    resp = await client.post(CHAT_URL, json=payload, timeout=timeout)
-    resp.raise_for_status()
+    try:
+        resp = await client.post(CHAT_URL, json=payload, timeout=timeout)
+        resp.raise_for_status()
+    except httpx.HTTPStatusError as e:
+        if e.response.status_code == 404:
+            raise RuntimeError(
+                f"OpenRouter returned 404 for model '{grader_model}'. "
+                f"This usually means the model ID is not recognised. "
+                f"Check https://openrouter.ai/models for the correct ID. "
+                f"(Raw: {e})"
+            ) from e
+        raise RuntimeError(
+            f"OpenRouter HTTP {e.response.status_code} for model "
+            f"'{grader_model}': {e}"
+        ) from e
     data = resp.json()
     if "choices" not in data or not data["choices"]:
         raise RuntimeError(f"No choices in grader response: {data}")

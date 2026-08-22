@@ -1,19 +1,26 @@
 # sudoku-agent-harness
 
-Agentic Sudoku-solving harness. Given a *directory* of puzzle images and an
-OpenRouter model ID, this program runs a single persistent
+A general-purpose agentic harness for file-in / file-out tasks. Given a
+*directory* of input files, an OpenRouter model ID, and a **task spec**, this
+program runs a single persistent
 [smolagents](https://github.com/huggingface/smolagents) `CodeAgent`
-sequentially across every puzzle — sharing conversation history, Python
-interpreter state, and working-directory files across rounds. The first
-puzzle is a warmup; subsequent rounds reuse whatever infrastructure the
-agent built.
+sequentially across every input — sharing conversation history, Python
+interpreter state, and working-directory files across rounds. The first round
+is a warmup; subsequent rounds reuse whatever infrastructure the agent built.
 
 That's the design choice that makes this a real intelligence test: it
 measures whether an agent can *learn from its session*, not just one-shot
-each puzzle independently.
+each item independently.
 
-It exists as a separate program (not a library) so the
-[sudoku-vision-benchmark](../sudoku-vision-benchmark/) benchmarker can treat
+**The harness holds no task of its own.** What the agent is asked to do — the
+prompts, the filenames, the tools dropped into its working directory — arrives
+in the `--task` spec. It is named for the benchmark it was built for, but it
+knows nothing about Sudoku: that task is defined by
+[sudoku-vision-benchmark](../sudoku-vision-benchmark/) in
+`benchmarker/task.py` and passed in. Which is the point — a different harness
+serves the same task by reading the same spec, with nothing to re-implement.
+
+It exists as a separate program (not a library) so the benchmarker can treat
 it as an opaque box. Any harness matching the same CLI contract can be
 substituted.
 
@@ -22,41 +29,85 @@ substituted.
 ```sh
 sudoku-agent-harness \
     --model MODEL_ID \
-    --puzzles-dir /path/to/puzzles/ \
+    --task /path/to/task.json \
+    --inputs-dir /path/to/inputs/ \
     --output-dir /path/to/outputs/ \
     [--timeout 1200]
 ```
 
-- `--puzzles-dir` — a directory containing `puzzle_NNN.png` files. The
-  harness picks them up in sorted order and solves them **sequentially** in
-  the same agent.
-- `--output-dir` — where solution PNGs are written, one per puzzle. Each
-  output file has the **same filename** as its corresponding input.
-- Each solution PNG **must preserve the input's dimensions and 9x9 grid
-  layout** so downstream graders can crop cells at known coordinates. The
-  task prompt enforces this constraint on the agent.
+- `--task` — the task spec (below). Everything task-specific comes from here.
+- `--inputs-dir` — a directory of input files, matched by the spec's
+  `input_glob`. The harness takes them in sorted order and works through them
+  **sequentially** in the same agent. `--puzzles-dir` is accepted as an alias
+  for callers written against the older contract.
+- `--output-dir` — where each round's output is collected. Each output file
+  has the **same filename** as its corresponding input.
 - `--timeout` is per-round (soft), not total.
+
+Any constraint on the *content* of the output — for this benchmark, that a
+solution PNG preserves the input's dimensions and 9x9 grid layout so graders
+can crop cells at known coordinates — is the task's business, stated in the
+task's prompt. The harness only moves files.
+
+### The task spec
+
+```json
+{
+  "task": "sudoku-vision",
+  "input_filename": "input.png",
+  "output_filename": "output.png",
+  "input_glob": "puzzle_*.png",
+  "assets": ["/abs/path/to/verify_sudoku.py"],
+  "prompts": {
+    "first_round": {"vision": "...", "text_only": "..."},
+    "next_round":  {"vision": "...", "text_only": "..."}
+  }
+}
+```
+
+- `input_filename` / `output_filename` — what each round's input is copied to
+  in the working directory, and what the agent is expected to leave behind.
+- `input_glob` — which files in `--inputs-dir` are rounds.
+- `assets` — files copied into the working directory at the start of a
+  session. For this benchmark that's the verifier the agent is required to
+  use instead of writing its own; another task might ship a reference
+  document or a helper script. The harness neither knows nor cares what they
+  are.
+- `prompts` — `first_round` carries the full rules, `next_round` is the terse
+  follow-up (the session is persistent, so re-sending the rules just burns
+  context). Each has a `vision` and a `text_only` variant; the harness picks
+  `text_only` when the model can't accept images, and a task that supplies
+  only one variant gets it used for both.
+
+Prompts may use `{round}`, `{n_rounds}`, `{input_filename}` and
+`{output_filename}`. Substitution is literal replacement, not `str.format`,
+so a prompt containing braces cannot break a run.
 
 ### Exit codes
 
-- `0` — every round completed cleanly (an output PNG exists for each puzzle).
-- `1` — at least one round finished without producing its output PNG.
-- `2` — fatal error before or during setup (bad args, missing env, missing
-  puzzles dir, etc.).
+- `0` — every round completed cleanly (an output file exists for each input).
+- `1` — at least one round finished without producing its output file.
+- `2` — fatal error before or during setup (bad args, missing env, missing or
+  invalid task spec, missing inputs dir, etc.).
 
 ### Stdout
 
 Streaming JSONL. One line per round as it finishes:
 
 ```json
-{"puzzle_id": 0, "puzzle_name": "puzzle_000.png", "round": 1, "success": true, "elapsed": 42.1, "final_answer": "..."}
-{"puzzle_id": 1, "puzzle_name": "puzzle_001.png", "round": 2, "success": true, "elapsed": 8.7, "final_answer": "..."}
+{"item_id": 0, "item_name": "puzzle_000.png", "round": 1, "success": true, "elapsed": 42.1, "final_answer": "..."}
+{"item_id": 1, "item_name": "puzzle_001.png", "round": 2, "success": true, "elapsed": 8.7, "final_answer": "..."}
 ```
+
+`item_id` is the trailing number in the input's filename, so a caller can
+correlate a round with the input it supplied without the harness knowing what
+the inputs mean. (`puzzle_id` / `puzzle_name` were the pre-rename names;
+readers on both sides still accept them, so old state files keep resuming.)
 
 A final summary line closes the run:
 
 ```json
-{"summary": true, "n_puzzles": 100, "n_solved": 97, "total_elapsed": 812.3}
+{"summary": true, "n_rounds": 100, "n_puzzles": 100, "n_solved": 97, "total_elapsed": 812.3}
 ```
 
 Callers should consume stdout line-by-line to stream progress; a line with
@@ -74,21 +125,21 @@ different one, and come back later — re-run the same command and it skips
 what's already done:
 
 ```txt
-[harness] resuming: 1/2 puzzles already solved for moonshotai/kimi-k3.
-[harness] round 1/2: puzzle_000.png already solved, skipping
+[harness] resuming: 1/2 round(s) already done for moonshotai/kimi-k3.
+[harness] round 1/2: puzzle_000.png already done, skipping
 ```
 
 Skipped rounds are replayed onto stdout with `"resumed": true`, so callers
-still see a record for every puzzle. Their tokens are excluded from the
+still see a record for every input. Their tokens are excluded from the
 session totals, which count only work this process actually did.
 
 State is only reused when it is genuinely safe:
 
-- The puzzle set must be **byte-identical** — the fingerprint hashes file
-  contents, so regenerating puzzles with a new seed invalidates it even
-  though the filenames are unchanged.
+- The input set must be **byte-identical** — the fingerprint hashes file
+  contents, so regenerating the inputs invalidates it even though the
+  filenames are unchanged.
 - The model must match.
-- The solution image must still be on disk.
+- The output file must still be on disk.
 
 Otherwise the harness says why and starts fresh. Pass `--fresh` to force a
 full re-run.
@@ -134,14 +185,18 @@ The solving rules do not change: pixels in, reasoning yours, no solver.
 
 ## Solving rules and the verifier
 
+Everything in this section is the *task's* doing, not the harness's — it lives
+in the benchmark's `benchmarker/task.py` and `benchmarker/agent_assets/`, and
+is described here because it is what this harness is normally pointed at.
+
 The task prompt forbids the agent from writing any code that touches Sudoku
 digits — no solver, no candidate elimination, and no self-written checker.
 Code is for pixels only: reading the puzzle image and drawing the answer.
 Models rationalise their way around vaguer wording ("a verification script,
 not a solver"), so the prohibition names those framings explicitly.
 
-To make that rule free rather than costly, each session gets
-`verify_sudoku.py` in its working directory:
+To make that rule free rather than costly, the task ships `verify_sudoku.py`
+as an asset, and the harness installs it in the working directory:
 
 ```sh
 python verify_sudoku.py --text "483957261 915362748 ..."
@@ -175,9 +230,9 @@ archive/<model>/
 └── session.json      # round records + final answers
 ```
 
-The scratch `input.png` / `output.png` are skipped (the benchmarker already
-keeps those); what's preserved is the agent's *own* code. That's the audit
-trail: the task prompt forbids writing a Sudoku solver, and this is how you
+The scratch input/output files named by the task spec are skipped (the caller
+already has both); what's preserved is the agent's *own* code. That's the audit
+trail: this task's prompt forbids writing a Sudoku solver, and this is how you
 check whether a model did it anyway. Re-running a model replaces its archive.
 
 Override the location with `--archive-dir`. `archive/` is gitignored.
@@ -192,7 +247,8 @@ uv sync
 
 ```sh
 uv run sudoku-agent-harness --model openai/gpt-4o \
-    --puzzles-dir puzzles/ --output-dir solutions/
+    --task ../sudoku-vision-benchmark/results/task.json \
+    --inputs-dir puzzles/ --output-dir solutions/
 ```
 
 ## Alternative harnesses
@@ -213,4 +269,6 @@ Other options considered:
   than smolagents but reinvents the code-execution sandbox.
 - **[general-agent](../general-agent/)** — sibling repo starting a
   skill-based agent framework. Once it's mature, we may wrap it as a
-  drop-in `sudoku-agent-harness`-compatible CLI.
+  drop-in CLI-compatible replacement. Since the task arrives as a spec, that
+  wrapper has no Sudoku code to write: read `--task`, run the prompts, write
+  the output file.

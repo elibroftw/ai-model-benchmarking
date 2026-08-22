@@ -21,6 +21,7 @@ from benchmarker.benchmark import (  # noqa: E402
     Benchmark,
     DEFAULT_GRADER_MODEL,
     DEFAULT_HARNESS_CMD,
+    DEFAULT_HARNESS_ID,
 )
 from benchmarker.trials import DEFAULT_TRIALS_DIR  # noqa: E402
 
@@ -32,7 +33,12 @@ DISABLED_CATEGORY = "disabled"
 
 
 def _read_models_file(path, skip_expensive=False):
-    """Load model IDs from a .toml manifest, or a plain one-per-line list."""
+    """Load model IDs from a .toml manifest, or a plain one-per-line list.
+
+    Returns (enabled, skipped, expensive_ids): ``enabled`` is a list of
+    (id, category), ``skipped`` a list of (id, note), and ``expensive_ids``
+    a set of model IDs that are marked expensive (enabled entries only).
+    """
     path = Path(path)
     if path.suffix == ".toml":
         return _read_models_toml(path, skip_expensive=skip_expensive)
@@ -41,7 +47,7 @@ def _read_models_file(path, skip_expensive=False):
         line = line.strip()
         if line and not line.startswith("#"):
             models.append((line, DEFAULT_CATEGORY))
-    return models, []
+    return models, [], set()
 
 
 def _read_models_toml(path, skip_expensive=False):
@@ -52,16 +58,16 @@ def _read_models_toml(path, skip_expensive=False):
     The `disabled` category is never run, and `expensive = true` entries are
     held back when skip_expensive is set.
 
-    Returns (enabled, skipped): `enabled` is a list of (id, category) and
-    `skipped` a list of (id, note), so the run can report what it left out
-    rather than silently dropping it.
+    Returns (enabled, skipped, expensive_ids): ``enabled`` is a list of
+    (id, category), ``skipped`` a list of (id, note), and ``expensive_ids``
+    is a set of model IDs within the *enabled* list that are marked expensive.
     """
     data = tomllib.loads(path.read_text())
     section = data.get("models")
     if not isinstance(section, dict):
         raise TypeError(f"{path}: expected a [models] table of categories.")
 
-    enabled, skipped = [], []
+    enabled, skipped, expensive_ids = [], [], set()
     for category, items in section.items():
         if not isinstance(items, list):
             raise TypeError(
@@ -69,9 +75,11 @@ def _read_models_toml(path, skip_expensive=False):
             )
         for i, item in enumerate(items):
             if isinstance(item, str):
-                model_id, note = item, ""
+                model_id, note, expensive = item, "", False
             elif isinstance(item, dict):
-                model_id, note = item.get("id"), item.get("note", "")
+                model_id = item.get("id")
+                note = item.get("note", "")
+                expensive = bool(item.get("expensive"))
             else:
                 raise TypeError(
                     f"{path}: [models].{category} entry #{i + 1} must be a "
@@ -81,14 +89,15 @@ def _read_models_toml(path, skip_expensive=False):
                 raise ValueError(
                     f"{path}: [models].{category} entry #{i + 1} has no `id`."
                 )
-            expensive = bool(isinstance(item, dict) and item.get("expensive"))
             if category == DISABLED_CATEGORY:
                 skipped.append((model_id, note))
             elif expensive and skip_expensive:
                 skipped.append((model_id, note or "marked expensive"))
             else:
                 enabled.append((model_id, category))
-    return enabled, skipped
+                if expensive:
+                    expensive_ids.add(model_id)
+    return enabled, skipped, expensive_ids
 
 
 def main():
@@ -130,8 +139,17 @@ def main():
         default=DEFAULT_HARNESS_CMD,
         help=f"Command to invoke the agentic harness subprocess "
         f"(default: {DEFAULT_HARNESS_CMD}). It is called ONCE per model and must "
-        f"accept --model, --puzzles-dir, --output-dir, --timeout, solve the puzzles "
-        f"sequentially in one session, and stream one JSONL record per round to stdout.",
+        f"accept --model, --task, --inputs-dir, --output-dir, --timeout, work "
+        f"through the inputs sequentially in one session, and stream one JSONL "
+        f"record per round to stdout. The task itself — prompts and the agent's "
+        f"verifier — is passed in via --task, so a harness needs no knowledge of "
+        f"Sudoku.",
+    )
+    parser.add_argument(
+        "--harness-id",
+        default=DEFAULT_HARNESS_ID,
+        help="Short label for the harness, used in the solutions directory name "
+        f"(e.g. solutions-<id>/). Default: {DEFAULT_HARNESS_ID}.",
     )
     parser.add_argument(
         "--grader-model",
@@ -174,6 +192,8 @@ def main():
 
     if args.models:
         models = list(args.models)
+        expensive_ids = set()
+        model_categories = {}
     else:
         path = args.models_file or DEFAULT_MODELS_FILE
         if not Path(path).exists():
@@ -181,7 +201,7 @@ def main():
                 f"No models given on the command line and models file '{path}' does not exist."
             )
         try:
-            entries, skipped = _read_models_file(
+            entries, skipped, expensive_ids = _read_models_file(
                 path, skip_expensive=args.skip_expensive
             )
         except (tomllib.TOMLDecodeError, TypeError, ValueError) as e:
@@ -189,6 +209,7 @@ def main():
         if not entries:
             parser.error(f"No enabled models in '{path}'.")
         models = [model_id for model_id, _ in entries]
+        model_categories = dict(entries)
 
         by_category = {}
         for model_id, category in entries:
@@ -202,6 +223,8 @@ def main():
             print(f"  skipping: {model_id}{reason}")
 
     print(f"Models to test on the same puzzle set: {', '.join(models)}")
+    if expensive_ids:
+        print(f"  Expensive: {', '.join(sorted(expensive_ids))}")
 
     bench = Benchmark(
         models=models,
@@ -211,10 +234,13 @@ def main():
         concurrency=args.concurrency,
         difficulty=args.difficulty,
         harness_cmd=args.harness_cmd,
+        harness_id=args.harness_id,
         grader_model=args.grader_model,
         harness_timeout=args.harness_timeout,
         verbose=args.verbose,
         trials_dir=None if args.no_trials else args.trials_dir,
+        expensive_models=expensive_ids,
+        model_categories=model_categories,
     )
     bench.run()
 
