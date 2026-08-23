@@ -402,6 +402,14 @@ def collect(results_dir, models_file=None, verify_images=True, solutions_dir=Non
         solutions_dir = Path(solutions_dir)
     fingerprint = puzzle_image_fingerprint(results_dir / "puzzle_images")
 
+    # Detect whether vision middleware was active: puzzle_NNN.txt files next
+    # to the rendered input images mean the middleware transcribed them.
+    was_middleware = False
+    puzzle_images_dir = results_dir / "puzzle_images"
+    if puzzle_images_dir.is_dir():
+        txt_files = list(puzzle_images_dir.glob("puzzle_*.txt"))
+        was_middleware = len(txt_files) > 0
+
     puzzles = []
     puzzles_path = results_dir / "puzzles.json"
     if puzzles_path.exists():
@@ -506,6 +514,7 @@ def collect(results_dir, models_file=None, verify_images=True, solutions_dir=Non
         in_price, out_price = model_costs.get(s["model"], (0.0, 0.0))
         s["cost_per_1M_input"] = in_price
         s["cost_per_1M_output"] = out_price
+        s.setdefault("middleware", was_middleware)
 
     # Drop models the manifest marks as disabled — they are noise.
     disabled_ids = load_disabled_ids(models_file) if models_file else set()
@@ -643,9 +652,9 @@ def _verified_accuracy(summary):
 
 
 def _difficulty_mix(puzzles):
-    mix = {}
+    mix = {'easy': 0, 'medium': 0, 'hard': 0}
     for p in puzzles:
-        mix[p.get("difficulty")] = mix.get(p.get("difficulty"), 0) + 1
+        mix[p['difficulty']] += 1
     return mix
 
 
@@ -799,7 +808,7 @@ def unverified_claims(report):
 def format_text(report, *, hide_errors=False):
     """Human-readable report for a terminal."""
     out = []
-    mix = ", ".join(f"{k} {v}" for k, v in sorted(report["difficulty_mix"].items()))
+    mix = ", ".join(f"{k}: {v}" for k, v in report["difficulty_mix"].items())
     t = report["totals"]
     out.append(f"=== {report['results_dir']} ===")
     out.append(
@@ -837,18 +846,19 @@ def format_text(report, *, hide_errors=False):
     else:
         if hide_errors:
             out.append(
-                f"{'#':>2}  {'model':<38} {'type':>4} {'score':>7} {'avg s':>8} {'cost':>8} {'$/h':>8} {'claimed':>8} "
+                f"{'#':>2}  {'model':<38} {'type':>4} {'mw':>3} {'score':>7} {'avg s':>8} {'cost':>8} {'$/h':>8} {'claimed':>8} "
                 f"{'imgs':>6} {'tok_in':>11} {'tok_out':>11}"
             )
         else:
             out.append(
-                f"{'#':>2}  {'model':<38} {'type':>4} {'score':>7} {'avg s':>8} {'cost':>8} {'$/h':>8} {'claimed':>8} "
+                f"{'#':>2}  {'model':<38} {'type':>4} {'mw':>3} {'score':>7} {'avg s':>8} {'cost':>8} {'$/h':>8} {'claimed':>8} "
                 f"{'imgs':>6} {'tok_in':>11} {'tok_out':>11} {'errs':>5}"
             )
         for i, s in enumerate(report["summaries"], 1):
             imgs = f"{s['n_output_images']}/{s['n_puzzles']}"
+            mw = "yes" if s.get("middleware") else " --"
             row = (
-                f"{i:>2}  {s['model']:<38} {s.get('type', 'V'):>4} {_score_cell(s):>7} "
+                f"{i:>2}  {s['model']:<38} {s.get('type', 'V'):>4} {mw:>3} {_score_cell(s):>7} "
                 f"{s['avg_elapsed_s']:>8.1f} {_cost_cell(s):>8} {_cost_per_hour_cell(s):>8} "
                 f"{_claimed(s):>8} {imgs:>6} "
                 f"{s['input_tokens']:>11,} {s['output_tokens']:>11,}"
@@ -857,6 +867,9 @@ def format_text(report, *, hide_errors=False):
                 row += f" {s['n_errors']:>5}"
             out.append(row)
         out.append("")
+        out.append(
+            "  mw      = vision middleware was active during this run (yes / --)."
+        )
         out.append(
             "  score   = grader-verified correct when the grading API returned "
             "verdicts, otherwise"
@@ -1065,29 +1078,27 @@ def grader_disagreements(report):
 
 def format_markdown(report, *, hide_errors=False):
     """Same content as `format_text`, pasteable into a README or an issue."""
-    mix = ", ".join(f"{k} {v}" for k, v in sorted(report["difficulty_mix"].items()))
+    mix = ", ".join(f"{k}: {v}" for k, v in report["difficulty_mix"].items())
     t = report["totals"]
     out = [
-        f"# Benchmark summary — `{report['results_dir']}`",
-        "",
         f"{report['n_puzzles']} puzzles"
-        + (f" ({mix})" if mix else " (puzzles.json missing)")
-        + f", {t['models']} models ({t['graded_models']} with run records).",
+        + (f" ({mix})" if mix else " (puzzles.json missing)"),
         "",
     ]
     if hide_errors:
         out += [
-            "| # | model | type | score | avg s | cost | $/h | images | tok_in | tok_out |",
-            "|--:|---|:--:|--:|--:|--:|--:|--:|--:|--:|",
+            "| # | model | type | mw | score | avg s | cost | $/h | images | tok_in | tok_out |",
+            "|--:|---|:--:|:--:|--:|--:|--:|--:|--:|--:|--:|",
         ]
     else:
         out += [
-            "| # | model | type | score | avg s | cost | $/h | images | tok_in | tok_out | errors |",
-            "|--:|---|:--:|--:|--:|--:|--:|--:|--:|--:|--:|",
+            "| # | model | type | mw | score | avg s | cost | $/h | images | tok_in | tok_out | errors |",
+            "|--:|---|:--:|:--:|--:|--:|--:|--:|--:|--:|--:|--:|",
         ]
     for i, s in enumerate(report["summaries"], 1):
+        mw = "yes" if s.get("middleware") else "--"
         row = (
-            f"| {i} | `{s['model']}` | {s.get('type', 'V')} | {_score_cell(s)} | "
+            f"| {i} | `{s['model']}` | {s.get('type', 'V')} | {mw} | {_score_cell(s)} | "
             f"{s['avg_elapsed_s']:.1f} | {_cost_cell(s)} | {_cost_per_hour_cell(s)} | "
             f"{s['n_output_images']}/{s['n_puzzles']} | "
             f"{s['input_tokens']:,} | {s['output_tokens']:,}"
@@ -1097,15 +1108,6 @@ def format_markdown(report, *, hide_errors=False):
         else:
             row += f" | {s['n_errors']} |"
         out.append(row)
-    out += [
-        "",
-        "`score` — grader-verified correct when the grading API returned verdicts, "
-        "otherwise locally transcribed and checked against the clues and Sudoku "
-        "rules. `cost` — total API spend at published OpenRouter prices, shown "
-        "only for models that answered every puzzle correctly. `$/h` — cost per "
-        "wall-clock hour. "
-        "Ranked on the same correctness signal that fills `score`.",
-    ]
     check = report.get("image_check")
     if check is not None and not check["all_ok"]:
         out.append("")

@@ -251,6 +251,35 @@ uv run sudoku-agent-harness --model openai/gpt-4o \
     --inputs-dir puzzles/ --output-dir solutions/
 ```
 
+### Custom endpoints (LM Studio, Ollama, vLLM, etc.)
+
+Models served locally through an OpenAI-compatible API can be wired in
+via `models.toml`.  Add an entry under `[custom_models]` and pass both
+`--model` (matching the key) and `--models-config`:
+
+```toml
+# models.toml (in the harness root, or anywhere you point --models-config to)
+[custom_models."qwen3.8-27b@q8_k_xl"]
+provider = "openai"
+model_name = "qwen3.8-27b@q8_k_xl"
+api_base = "http://127.0.0.1:1234/v1"
+api_key = "not-needed"
+```
+
+```sh
+uv run sudoku-agent-harness --model "qwen3.8-27b@q8_k_xl" \
+    --models-config models.toml \
+    --task ../sudoku-vision-benchmark/results/task.json \
+    --inputs-dir puzzles/ --output-dir solutions/
+```
+
+The harness resolves `--model` against `[custom_models]` first; when it
+matches a key, the LiteLLM model is constructed with those settings
+instead of the default OpenRouter path.  When there is no match, the
+original OpenRouter behaviour (environment variable + `openrouter/`
+prefix) is used, so a `models.toml` with only a few entries does not
+affect the rest.
+
 ## Alternative harnesses
 
 If you outgrow smolagents (e.g. you want a sandboxed shell, editor, browser,

@@ -41,7 +41,9 @@ from PIL import Image
 # Placeholders a task prompt may use; everything else is literal text.
 # Substituted by plain replacement, never str.format, so a prompt containing
 # braces (a JSON example, a dict literal) cannot break a run.
-PROMPT_PLACEHOLDERS = ("round", "n_rounds", "input_filename", "output_filename")
+PROMPT_PLACEHOLDERS = (
+    "round", "n_rounds", "input_filename", "output_filename", "transcription",
+)
 
 DEFAULT_INPUT_FILENAME = "input.png"
 DEFAULT_OUTPUT_FILENAME = "output.png"
@@ -86,11 +88,17 @@ def load_task(path) -> dict:
     spec.setdefault("output_filename", DEFAULT_OUTPUT_FILENAME)
     spec.setdefault("input_glob", DEFAULT_INPUT_GLOB)
     spec.setdefault("assets", [])
+    # Optional map of input filename → a text description of that file, which
+    # a prompt can place with {transcription}. The harness neither produces nor
+    # interprets these; it just hands each round the entry for its own input.
+    if not isinstance(spec.get("transcriptions"), dict):
+        spec["transcriptions"] = {}
     return spec
 
 
 def build_prompt(spec: dict, *, round_number: int, n_rounds: int,
-                 first: bool, with_images: bool) -> str:
+                 first: bool, with_images: bool,
+                 transcription: str | None = None) -> str:
     """Pick the prompt for this round and fill in the generic placeholders."""
     variants = spec["prompts"]["first_round" if first else "next_round"]
     template = variants.get("vision" if with_images else "text_only") or (
@@ -101,6 +109,7 @@ def build_prompt(spec: dict, *, round_number: int, n_rounds: int,
         "n_rounds": str(n_rounds),
         "input_filename": spec["input_filename"],
         "output_filename": spec["output_filename"],
+        "transcription": transcription or "",
     }
     for key in PROMPT_PLACEHOLDERS:
         template = template.replace("{" + key + "}", values[key])
@@ -510,11 +519,13 @@ def run(
     archive_dir: Path | None = None,
     fresh: bool = False,
     send_images: bool = True,
+    models_config: Path | None = None,
 ) -> dict:
     """Run the agentic harness across a whole directory of task inputs.
 
     Args:
-        model_id: OpenRouter model ID (e.g. "openai/gpt-4o").
+        model_id: OpenRouter model ID (e.g. "openai/gpt-4o"), or a key in the
+            [custom_models] table of ``models_config``.
         inputs_dir: Directory of input files, one per round, taken in sorted
             order. Which files count is the task's `input_glob`.
         output_dir: Directory where each round's output is collected, under
@@ -539,6 +550,12 @@ def run(
             automatically, switching to the task's `text_only` prompts. Pass
             False to skip the failed attempt when you already know the model is
             text-only.
+        models_config: Path to a TOML file whose [custom_models] table maps
+            model IDs to custom endpoint settings (provider, model_name,
+            api_base, api_key). When ``model_id`` matches a key in that table
+            the harness uses those settings to construct the LiteLLM model
+            instead of the default OpenRouter path. Pass None (or omit) for
+            the default behaviour.
 
     Returns:
         dict with `success` (bool), `rounds` (list of per-round records),
@@ -551,6 +568,22 @@ def run(
     api_key = os.environ.get("OPENROUTER_API_KEY")
     if not api_key:
         raise RuntimeError("OPENROUTER_API_KEY not set (check .env file).")
+
+    # Resolve custom model config before falling back to OpenRouter.
+    custom = _resolve_custom_model(model_id, models_config)
+    if custom is not None:
+        litellm_model_id = f"{custom['provider']}/{custom['model_name']}"
+        litellm_api_key = custom["api_key"]
+        litellm_api_base = custom["api_base"]
+        print(
+            f"[harness] custom model {model_id!r} -> "
+            f"{custom['provider']}/{custom['model_name']} @ {custom['api_base']}",
+            file=sys.stderr,
+        )
+    else:
+        litellm_model_id = f"openrouter/{model_id}"
+        litellm_api_key = api_key
+        litellm_api_base = "https://openrouter.ai/api/v1"
 
     spec = task if isinstance(task, dict) else load_task(task)
     task_name = spec.get("task", "")
@@ -581,9 +614,9 @@ def run(
         )
 
     model = LiteLLMModel(
-        model_id=f"openrouter/{model_id}",
-        api_key=api_key,
-        api_base="https://openrouter.ai/api/v1",
+        model_id=litellm_model_id,
+        api_key=litellm_api_key,
+        api_base=litellm_api_base,
     )
     deadline = _RoundDeadline(timeout)
     agent = CodeAgent(
@@ -597,7 +630,7 @@ def run(
             "PIL.ImageOps", "PIL.ImageFilter",
             "numpy",
             # Filesystem / IO
-            "os", "os.path", "io", "pathlib", "shutil", "glob", "tempfile",
+            "os", "os.path", "io", "pathlib", "shutil", "glob", "tempfile", "posixpath",
             # Data handling
             "json", "base64", "re", "collections", "itertools", "math",
             # Shell / external tools
@@ -686,6 +719,10 @@ def run(
                 item_id = _item_id_from_name(input_path)
                 first_executed = executed == 0
 
+                # A description of this round's input, if the task spec
+                # carries one, for prompts that use {transcription}.
+                transcription_text = spec["transcriptions"].get(input_path.name)
+
                 def _build_prompt(with_images):
                     return build_prompt(
                         spec,
@@ -693,6 +730,7 @@ def run(
                         n_rounds=n_rounds,
                         first=first_executed,
                         with_images=with_images,
+                        transcription=transcription_text,
                     )
 
                 prompt = _build_prompt(send_images)
@@ -851,6 +889,41 @@ def _item_id_from_name(path: Path) -> int | None:
     parts = stem.rsplit("_", 1)
     if len(parts) == 2 and parts[1].isdigit():
         return int(parts[1])
+    return None
+
+
+def _resolve_custom_model(model_id: str, config_path) -> dict | None:
+    """Look up `model_id` in a TOML config's [custom_models] table.
+
+    Returns a dict with keys ``provider``, ``model_name``, ``api_base``,
+    ``api_key`` when the model is found, or None when it is not — the
+    caller should fall back to the default OpenRouter path.
+
+    Raises ValueError when the config file exists but is malformed, so the
+    user knows their explicit ``--models-config`` is broken.
+    """
+    import tomllib
+
+    if config_path is None:
+        return None
+    config_path = Path(config_path)
+    if not config_path.exists():
+        return None
+    try:
+        data = tomllib.loads(config_path.read_text())
+    except tomllib.TOMLDecodeError as e:
+        raise ValueError(f"could not parse {config_path}: {e}") from e
+    custom = data.get("custom_models") if isinstance(data, dict) else None
+    if not isinstance(custom, dict):
+        return None
+    entry = custom.get(model_id)
+    if isinstance(entry, dict):
+        return {
+            "provider": entry.get("provider", "openai"),
+            "model_name": entry["model_name"],
+            "api_base": entry["api_base"],
+            "api_key": entry.get("api_key", "not-needed"),
+        }
     return None
 
 

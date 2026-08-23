@@ -1,11 +1,15 @@
 # Roadmap
 
+## Run Harness in Docker Container
+
 ## Vision MiddleWare
 
 We want to innovate and invent vision/image middleware that can be added to any text-only models. How this would work is as follows.
-Our program can accept TEXT and IMAGES. If the model selected does not support images, we first send our image to the best vision model (all open-weight), with the best prompt at transcribing images. TODO subtask: find a way to benchmark transcribing performance by prompt by creating a harness where a model turns a transcription into an image which gets graded by similarity by another vision model like gemini. The text model can create its own prompt and use the results of the grader to keep tweaking and improving the prompt. The grader will use a variety of input images (TODO subtask: generate ideas for images to be used for transcribing; the purpose of such a middleware is to enable browser-use, computer-use, understanding what's on the computer screen. e.g. if shown an image of a 9x9 captcha, the middleware should transcribe what is contained in each box rather than the details. Another example is using UI).
+Our program can accept TEXT and IMAGES. If the model selected does not support images, we first send our image to the best vision model (all open-weight), with the best prompt at transcribing images.
 
-## Run Harness in Docker Container
+subtask: find a way to benchmark transcribing performance by prompt by creating a harness where a model turns a transcription into an image which gets graded by similarity by another vision model like gemini. The text model can create its own prompt and use the results of the grader to keep tweaking and improving the prompt. The grader will use a variety of input images.
+
+subtask: generate ideas for images to be used for transcribing; the purpose of such a middleware is to enable browser-use, computer-use, understanding what's on the computer screen. e.g. if shown an image of a 9x9 captcha, the middleware should transcribe what is contained in each box rather than the details. Another example is using UI.
 
 ## Alternative agentic harnesses
 
@@ -29,21 +33,6 @@ below:
 - **[SWE-agent](https://github.com/princeton-nlp/SWE-agent)** — narrower focus
   on repo-editing tasks; probably the right shape for a coding-delegation
   variant.
-- **Claude Agent SDK** — best-in-class tool loop, but Anthropic-only, so it
-  can't participate in the multi-model comparison this benchmark is designed
-  for. Fine for a solo Claude baseline.
-
-## Grading
-
-Currently uses an "LLM-as-grader" approach: the harness's output PNG is sent
-to a cheap vision model (default `google/gemini-flash-1.5`) which transcribes
-it into a 9x9 grid, then we verify the grid. Robust to any output style but
-adds a per-puzzle grading cost. Follow-ups:
-
-- Swap in a proper local OCR path (tesseract or a small CNN) since we know the
-  output image geometry matches the input by contract. Eliminates the grading
-  API cost and its nondeterminism.
-- Two-pass grading: cheap OCR first, LLM fallback only when OCR is uncertain.
 
 ## Delegation Benchmark (planned)
 

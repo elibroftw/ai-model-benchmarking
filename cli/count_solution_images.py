@@ -2,8 +2,8 @@
 """Report how many solution PNGs each model produced.
 
 Usage:
-    uv run count_solution_images.py                  # reads results/solutions
-    uv run count_solution_images.py path/to/dir      # override root
+    uv run cli/count_solution_images.py                  # reads results/solutions
+    uv run cli/count_solution_images.py path/to/dir      # override root
 """
 import sys
 from collections import defaultdict

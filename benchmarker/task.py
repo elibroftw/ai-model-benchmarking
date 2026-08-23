@@ -223,13 +223,142 @@ def build_spec():
     }
 
 
-def write_spec(path):
+# Sections injected when the vision middleware is active.  The harness
+# itself is unchanged: the task spec carries the transcription, so every
+# harness — including the default one — reads it without knowing where it
+# came from.
+#
+# For vision-capable models the transcription is supplementary — the image is
+# still attached, and the transcription helps catch misreads.
+# For text-only models the transcription replaces the self-extraction step,
+# so the model gets the clues directly and only touches the image for
+# geometry.
+
+VISION_WITH_MIDDLEWARE_SECTION = """## Reading the puzzle
+
+**The puzzle image is attached to this message — look at it directly.** The same image is on disk as `input.png` in your working directory.
+
+The image also carries a transcription of its contents as alt text.  Use the alt text as your primary source for the clue digits and their positions — it should save you from reading every digit off the image:
+
+<img src="{input_filename}" alt="{transcription}" />
+
+Cross-check a few cells against the attached image to confirm the transcription is accurate.  If you find a discrepancy, trust the image and correct that cell in your reasoning.  A misread clue wastes the whole round.
+
+Use `input.png` on disk for what vision can't give you precisely: grid geometry for rendering (image dimensions, grid bounds, cell size), and as the base image to draw onto.
+"""
+
+TEXT_ONLY_WITH_MIDDLEWARE_SECTION = """## Reading the puzzle
+
+**The puzzle image is on disk as `{input_filename}` for rendering purposes only.** You cannot see it, so its contents are described to you as alt text:
+
+<img src="{input_filename}" alt="{transcription}" />
+
+You do **not** need to extract the digits from the image — the alt text has them.  Use `input.png` **only** for its geometry: image dimensions, grid bounds, cell size, and as the base image to draw the solution onto.
+
+If the transcription looks inconsistent with Sudoku rules (e.g. a duplicated clue digit in a row), trust the image over the transcription for that cell — the image is the ground truth.
+"""
+
+
+# Used as the alt text when the middleware fails for a puzzle. The prompts are
+# shared by every round, so the alt attribute is always present; leaving it
+# empty would sit under text telling the model to rely on it, and would tell a
+# text-only model in the same breath not to read the image.
+TRANSCRIPTION_UNAVAILABLE = (
+    "TRANSCRIPTION UNAVAILABLE - the pre-transcription step failed for this "
+    "puzzle. Disregard any instruction above about not needing to read the "
+    "image: for this round you must read the clue digits from the image file "
+    "yourself."
+)
+
+
+def _as_alt_text(text: str) -> str:
+    """Make a transcription safe to sit inside an HTML alt attribute.
+
+    The transcription comes from an arbitrary vision model, so it can contain
+    anything. Only the quote characters actually matter — they would end the
+    attribute early and the grid would spill into the markup.
+    """
+    return text.replace('"', "&quot;").replace("\r\n", "\n")
+
+
+def build_spec_with_transcriptions(transcriptions: dict[int, str] | None = None):
+    """Like `build_spec`, but with {transcription} placeholders in the prompts.
+
+    When ``transcriptions`` is non-empty the prompts are rewritten to reference
+    ``{transcription}``, which the harness fills from ``puzzle_NNN.txt`` files
+    saved alongside the puzzle images.  The prompts for vision-capable models
+    treat the transcription as supplementary; text-only prompts use it as the
+    primary clue source.
+    """
+    if not transcriptions:
+        return build_spec()
+
+    spec = build_spec()
+    # The spec is the only channel between the benchmarker and the harness, so
+    # the alt text travels in it, keyed by the input file it describes. Nothing
+    # is written next to the images: the harness looks up the current round's
+    # file name and fills {transcription} from this map.
+    spec["transcriptions"] = {
+        f"puzzle_{pid:03d}.png": _as_alt_text(text)
+        for pid, text in transcriptions.items()
+    }
+
+    # Rewrite prompts to include {transcription} placeholder.
+    vision_first = WARMUP_PROMPT.replace(
+        "{reading_section}", VISION_WITH_MIDDLEWARE_SECTION
+    )
+    text_first = WARMUP_PROMPT.replace(
+        "{reading_section}", TEXT_ONLY_WITH_MIDDLEWARE_SECTION
+    )
+
+    # The transcription block must be repeated in the later-round prompts, not
+    # merely referred to. Each round is a fresh message with its own puzzle, and
+    # the harness fills {transcription} per round from that puzzle's .txt file;
+    # a prompt that says "use the transcription" without carrying one leaves the
+    # model with nothing — and tells a text-only model not to read the image.
+    vision_next = NEXT_PUZZLE_PROMPT.replace(
+        "{next_reading_line}",
+        VISION_NEXT_LINE
+        + "\n\nThis puzzle's image carries its own alt text.  Use it as your "
+          "primary source for the clue digits, cross-checking a few cells "
+          "against the attached image:\n\n"
+          "<img src=\"{input_filename}\" alt=\"{transcription}\" />",
+    )
+    text_next = NEXT_PUZZLE_PROMPT.replace(
+        "{next_reading_line}",
+        TEXT_ONLY_NEXT_LINE
+        + "\n\nThis puzzle's contents are described to you as alt text, so "
+          "you do not need to extract the digits.  Use `{input_filename}` "
+          "only for its geometry.\n\n"
+          "<img src=\"{input_filename}\" alt=\"{transcription}\" />",
+    )
+
+    spec["prompts"] = {
+        "first_round": {
+            "vision": vision_first,
+            "text_only": text_first,
+        },
+        "next_round": {
+            "vision": vision_next,
+            "text_only": text_next,
+        },
+    }
+
+    return spec
+
+
+def write_spec(path, transcriptions=None):
     """Write the task spec where a harness can read it, and return the path.
 
     Written fresh on every run: the prompts are code, and a stale spec left in
     a results directory would silently keep running the previous wording.
+
+    When ``transcriptions`` (a dict mapping puzzle id → text) is provided the
+    spec's prompts are rewritten to embed the transcriptions via the
+    ``{transcription}`` placeholder the harness already knows how to fill.
     """
+    spec = build_spec_with_transcriptions(transcriptions)
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(build_spec(), indent=2))
+    path.write_text(json.dumps(spec, indent=2))
     return path

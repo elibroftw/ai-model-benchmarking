@@ -11,4 +11,4 @@ dependencies = [
 ]
 
 [project.scripts]
-sudoku-benchmark = "run_benchmark:main"
+sudoku-benchmark = "cli.run_benchmark:main"

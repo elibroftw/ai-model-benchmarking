@@ -89,6 +89,15 @@ def main():
         "resumes: rounds already completed for this model against this exact "
         "input set are skipped, so an interrupted run can be restarted.",
     )
+    parser.add_argument(
+        "--models-config",
+        default=None,
+        help="Path to a TOML file mapping model IDs to custom endpoint "
+        "settings (provider, model_name, api_base, api_key). When the "
+        "model ID from --model matches a key under [custom_models], those "
+        "settings are used instead of the default OpenRouter path. Useful "
+        "for locally-served models via LM Studio, Ollama, vLLM, etc.",
+    )
     args = parser.parse_args()
 
     # Import late so `--help` is fast and doesn't require smolagents.
@@ -104,6 +113,9 @@ def main():
             archive_dir=Path(args.archive_dir) if args.archive_dir else None,
             fresh=args.fresh,
             send_images=not args.no_image,
+            models_config=(
+                Path(args.models_config) if args.models_config else None
+            ),
         )
     except Exception as e:  # noqa: BLE001 - top-level: report and exit non-zero
         print(json.dumps({"success": False, "error": f"{type(e).__name__}: {e}"}))

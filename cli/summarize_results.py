@@ -11,17 +11,21 @@ API and no trust in the agent's own account of its work. The transcriber is
 first checked against puzzles.json, whose grids it must reproduce exactly.
 
 Usage:
-    uv run summarize_results.py                          # text report on results/
-    uv run summarize_results.py --format markdown        # pasteable table
-    uv run summarize_results.py --write-leaderboard      # (re)write leaderboard.json
-    uv run summarize_results.py --results-dir other/     # another directory
+    uv run cli/summarize_results.py                          # text report on results/
+    uv run cli/summarize_results.py --format markdown        # pasteable table
+    uv run cli/summarize_results.py --write-leaderboard      # (re)write leaderboard.json
+    uv run cli/summarize_results.py --results-dir other/     # another directory
 """
 import argparse
 import json
 import sys
 from pathlib import Path
 
-from benchmarker.get_leaderboard import (
+# Running this as `uv run cli/<script>.py` puts cli/ on sys.path, not the repo
+# root, so the benchmarker package has to be pointed at explicitly.
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from benchmarker.get_leaderboard import (  # noqa: E402
     collect,
     format_markdown,
     format_text,

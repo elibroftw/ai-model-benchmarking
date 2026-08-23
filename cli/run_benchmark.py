@@ -2,9 +2,9 @@
 """Sudoku Vision Benchmark - grade LLMs via OpenRouter.
 
 Usage:
-    uv run run_benchmark.py                             # reads models.toml
-    uv run run_benchmark.py --models-file custom.txt    # override file
-    uv run run_benchmark.py openai/gpt-4o ...           # override with positional args
+    uv run cli/run_benchmark.py                             # reads models.toml
+    uv run cli/run_benchmark.py --models-file custom.txt    # override file
+    uv run cli/run_benchmark.py openai/gpt-4o ...           # override with positional args
 
 Every model in the run is graded on the SAME set of freshly-generated puzzles.
 """
@@ -12,6 +12,10 @@ import argparse
 import sys
 import tomllib
 from pathlib import Path
+
+# Running this as `uv run cli/<script>.py` puts cli/ on sys.path, not the repo
+# root, so the benchmarker package has to be pointed at explicitly.
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from dotenv import load_dotenv
 
@@ -164,6 +168,15 @@ def main():
         help="Per-puzzle timeout in seconds passed to the harness. Default is 20 minutes.",
     )
     parser.add_argument(
+        "--fresh",
+        action="store_true",
+        help="Forwarded to the harness: ignore its saved state and redo every "
+        "round. By default the harness resumes, replaying rounds it already "
+        "completed for a model against this exact puzzle set — which is what "
+        "you want after an interrupted run, but not when you are re-testing a "
+        "model whose earlier rounds you no longer trust.",
+    )
+    parser.add_argument(
         "--skip-expensive",
         action="store_true",
         help="Skip models marked `expensive = true` in the manifest. Useful for "
@@ -187,6 +200,29 @@ def main():
         action="store_true",
         help="Stream the harness's stderr live (smolagents step-by-step logs). "
         "Best paired with --concurrency 1; interleaved output is chaotic otherwise.",
+    )
+    parser.add_argument(
+        "--vision-middleware",
+        action="store_true",
+        help="Before the model loop, transcribe every puzzle image once "
+        "through a vision model (configured in vision-middleware/models.toml). "
+        "Each transcription is carried in the task spec and given to the agent "
+        "as that round's image alt text, so every model sees the same one and "
+        "the transcriber runs once per puzzle, not once per model.  Applied to "
+        "ALL models — text-only and vision-capable — for fairness.  Vision "
+        "models still receive the image itself as well.",
+    )
+    parser.add_argument(
+        "--vision-middleware-cmd",
+        default=None,
+        help="Command to invoke the vision middleware (default: python "
+        "vision-middleware/transcribe.py).  Must accept --image and --task.",
+    )
+    parser.add_argument(
+        "--vision-middleware-config",
+        default=None,
+        help="Path to the middleware's models.toml (default: "
+        "vision-middleware/models.toml).",
     )
     args = parser.parse_args()
 
@@ -237,10 +273,14 @@ def main():
         harness_id=args.harness_id,
         grader_model=args.grader_model,
         harness_timeout=args.harness_timeout,
+        fresh=args.fresh,
         verbose=args.verbose,
         trials_dir=None if args.no_trials else args.trials_dir,
         expensive_models=expensive_ids,
         model_categories=model_categories,
+        vision_middleware=args.vision_middleware,
+        vision_middleware_cmd=args.vision_middleware_cmd,
+        vision_middleware_config=args.vision_middleware_config,
     )
     bench.run()
 

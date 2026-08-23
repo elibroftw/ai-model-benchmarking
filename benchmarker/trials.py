@@ -69,11 +69,24 @@ def load_trial(path: Path) -> dict | None:
         return None
 
 
-def merge(existing, summaries, *, tid, seed, n_puzzles, difficulty, fingerprint):
+def _entry_key(entry):
+    """The composite identity of a trial entry: model + middleware flag."""
+    return (entry["model"], bool(entry.get("middleware", False)))
+
+
+def merge(existing, summaries, *, tid, seed, n_puzzles, difficulty, fingerprint,
+          middleware=False):
     """Merge this run's summaries into an existing trial.
 
-    Returns (trial, changes) where `changes` maps model id to one of
-    "new", "improved", or "kept", so the caller can report what actually
+    Each entry is keyed by ``(model, middleware)``, so a run with vision
+    middleware enabled and a run without it are tracked as independent
+    observations — they used different prompts and are not directly comparable.
+
+    Existing entries that predate the middleware field are treated as
+    ``middleware: false``.
+
+    Returns (trial, changes) where ``changes`` maps (model, middleware) to one
+    of "new", "improved", or "kept", so the caller can report what actually
     moved rather than claiming every model was recorded.
 
     Raises ValueError if the puzzle set's content hash disagrees with the
@@ -102,21 +115,27 @@ def merge(existing, summaries, *, tid, seed, n_puzzles, difficulty, fingerprint)
                 f"a different seed rather than merging incomparable results."
             )
         trial = dict(existing)
+        # Retroactive: entries written before the middleware field was added
+        # were all from no-middleware runs.
+        for e in trial.setdefault("entries", []):
+            e.setdefault("middleware", False)
         trial.setdefault("entries", [])
 
-    by_model = {e["model"]: e for e in trial["entries"]}
+    by_key = {_entry_key(e): e for e in trial["entries"]}
     changes = {}
 
     for summary in summaries:
         model = summary["model"]
         candidate = dict(summary)
+        candidate["middleware"] = bool(middleware)
         candidate["recorded_at"] = now
-        prior = by_model.get(model)
+        key = _entry_key(candidate)
+        prior = by_key.get(key)
 
         if prior is None:
             candidate["runs"] = 1
-            by_model[model] = candidate
-            changes[model] = "new"
+            by_key[key] = candidate
+            changes[key] = "new"
         elif is_better(candidate, prior):
             candidate["runs"] = prior.get("runs", 1) + 1
             candidate["previous_best"] = {
@@ -125,15 +144,15 @@ def merge(existing, summaries, *, tid, seed, n_puzzles, difficulty, fingerprint)
                 "total_tokens": prior.get("total_tokens"),
                 "recorded_at": prior.get("recorded_at"),
             }
-            by_model[model] = candidate
-            changes[model] = "improved"
+            by_key[key] = candidate
+            changes[key] = "improved"
         else:
             # Keep the better prior result, but remember it was re-attempted.
             prior["runs"] = prior.get("runs", 1) + 1
             prior["last_attempt_at"] = now
-            changes[model] = "kept"
+            changes[key] = "kept"
 
-    trial["entries"] = sorted(by_model.values(), key=_rank_key)
+    trial["entries"] = sorted(by_key.values(), key=_rank_key)
     trial["updated_at"] = now
     trial["puzzle_fingerprint"] = fingerprint
     return trial, changes

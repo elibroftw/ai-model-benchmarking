@@ -4,30 +4,47 @@
 
 After running the benchmark, even if it fails mid-way the following command reads the solutions dir.
 
-`uv run summarize_results.py --format markdown --hide-errors`
+`just summarize-md`
 
-| # | model | type | score | avg s | cost | $/h | images | tok_in | tok_out |
-|--:|---|:--:|--:|--:|--:|--:|--:|--:|--:|
-| 1 | `openai/gpt-5.6-sol` | V | 3/3 | 97.9 | $0.46 | $5.63 | 3/3 | 119,367 | 22,039 |
-| 2 | `anthropic/claude-opus-5` | V | 3/3 | 99.7 | $1.48 | $17.83 | 3/3 | 154,825 | 28,293 |
-| 3 | `anthropic/claude-fable-5` | V | 3/3 | 131.4 | $3.83 | $34.97 | 3/3 | 195,142 | 37,557 |
-| 4 | `openai/gpt-5.6-sol-pro` | V | 3/3 | 141.4 | $1.20 | $10.18 | 3/3 | 288,251 | 62,336 |
-| 5 | `meta/muse-spark-1.2` | V | 3/3 | 190.3 | $1.24 | $7.80 | 3/3 | 602,540 | 113,661 |
-| 6 | `deepseek/deepseek-v4-pro-0813` | T | 3/3 | 310.2 | $0.52 | $2.03 | 3/3 | 608,433 | 62,039 |
-| 7 | `z-ai/glm-5.3` | T | 3/3 | 404.7 | $1.86 | $5.51 | 3/3 | 957,568 | 117,955 |
-| 8 | `x-ai/grok-4.6` | V | 3/3 | 418.2 | $0.76 | $2.19 | 3/3 | 102,119 | 93,413 |
-| 9 | `moonshotai/kimi-k3` | V | 3/3 | 499.2 | $3.89 | $9.35 | 3/3 | 900,394 | 119,054 |
-| 10 | `qwen/qwen3.8-max` | V | 3/3 | 499.6 | $1.00 | $2.39 | 3/3 | 258,427 | 79,789 |
-| 11 | `~deepseek/deepseek-v4-flash-latest` | T | 3/3 | 527.4 | $0.13 | $0.30 | 3/3 | 1,396,193 | 218,938 |
-| 12 | `z-ai/glm-5.2` | T | 3/3 | 583.3 | $1.23 | $2.52 | 3/3 | 3,172,546 | 152,419 |
-| 13 | `qwen/qwen3.8-27b` | V | 3/3 | 584.2 | $0.41 | $0.85 | 3/3 | 197,418 | 111,643 |
+3 puzzles (easy 1, hard 1, medium 1)
+
+| # | model | type | mw | score | avg s | cost | $/h | images | tok_in | tok_out |
+|--:|---|:--:|:--:|--:|--:|--:|--:|--:|--:|--:|
+| 1 | `openai/gpt-5.6-terra` | V | -- | 3/3 | 66.2 | $0.77 | $13.95 | 3/3 | 260,255 | 20,740 |
+| 3 | `openai/gpt-5.6-terra-pro` | V | -- | 3/3 | 97.1 | $1.73 | $21.36 | 3/3 | 464,384 | 66,577 |
+| 4 | `openai/gpt-5.6-sol` | V | -- | 3/3 | 97.9 | $0.70 | $8.55 | 3/3 | 119,367 | 22,039 |
+| 5 | `anthropic/claude-opus-5` | V | -- | 3/3 | 99.7 | $1.48 | $17.83 | 3/3 | 154,825 | 28,293 |
+| 6 | `anthropic/claude-fable-5` | V | -- | 3/3 | 131.4 | $3.83 | $34.97 | 3/3 | 195,142 | 37,557 |
+| 7 | `openai/gpt-5.6-sol-pro` | V | -- | 3/3 | 141.4 | $1.78 | $15.08 | 3/3 | 288,251 | 62,336 |
+| 8 | `meta/muse-spark-1.2` | V | -- | 3/3 | 190.3 | $1.24 | $7.80 | 3/3 | 602,540 | 113,661 |
+| 9 | `anthropic/claude-sonnet-5` | V | -- | 3/3 | 212.3 | $1.59 | $9.00 | 3/3 | 417,092 | 75,732 |
+| 10 | `deepseek/deepseek-v4-pro-0813` | T | -- | 3/3 | 310.2 | $0.52 | $2.03 | 3/3 | 608,433 | 62,039 |
+| 11 | `z-ai/glm-5.3` | T | -- | 3/3 | 404.7 | $1.86 | $5.51 | 3/3 | 957,568 | 117,955 |
+| 12 | `x-ai/grok-4.6` | V | -- | 3/3 | 418.2 | $0.76 | $2.19 | 3/3 | 102,119 | 93,413 |
+| 13 | `moonshotai/kimi-k3` | V | -- | 3/3 | 499.2 | $3.89 | $9.35 | 3/3 | 900,394 | 119,054 |
+| 14 | `qwen/qwen3.8-max` | V | -- | 3/3 | 499.6 | $1.00 | $2.39 | 3/3 | 258,427 | 79,789 |
+| 15 | `~deepseek/deepseek-v4-flash-latest` | T | -- | 3/3 | 527.4 | $0.13 | $0.30 | 3/3 | 1,396,193 | 218,938 |
+| 16 | `z-ai/glm-5.2` | T | -- | 3/3 | 583.3 | $1.23 | $2.52 | 3/3 | 3,172,546 | 152,419 |
+| 17 | `qwen/qwen3.8-27b` | V | -- | 3/3 | 584.2 | $0.41 | $0.85 | 3/3 | 197,418 | 111,643 |
+
+NOTE: Used non-discounted price for gpt-5.6-sol.
+
+TODO: if an older model has lost in both correctness and cost effectiveness respective to being closed/open-weights, it should not be tested ever again (don't use preliminary results to filter models). Based on preliminary results, here are the models I would remove:
+
+- glm-5.3 (made obsolete by v4 pro)
+- glm-5.2 (made obsolete by v4 flash)
+- qwen3.8-max (made obsolete by grok 4.6)
+- openai/gpt-5.6-sol-pro (made obsolete by 5.6-sol)
+  - This is a great example of why preliminary results should not be used to filter models, we need to increase quantity + difficulty
+- qwen3.8-27b, moonshotai/kimi-k3
+  - I want to test unsloth's GGUF, so not yet
 
 ## Models That Failed Preliminary Benchmark
 
 The preliminary benchmark was the following command. The harness was run repeatedly with a seed of 42 and n-puzzles 3 until the harness wasn't the blocking factor regarding completion. Models that could not complete 3/3 are listed in models.toml. Models that were released less than 6 months ago and failed the preliminary benchmark are listed here.
 
 ```py
-uv run run_benchmark.py \
+uv run cli/run_benchmark.py \
     --harness-cmd "uv run --project ./sudoku-agent-harness sudoku-agent-harness" \
     --harness-id smolagents \
     --n-puzzles 3 \

@@ -25,7 +25,7 @@ from .generator import generate_puzzle
 from .grader import parse_grader_response, verify
 from .openrouter import extract_grid
 from .get_leaderboard import summarize as _summarize
-from .task import write_spec as write_task_spec
+from .task import TRANSCRIPTION_UNAVAILABLE, write_spec as write_task_spec
 from .renderer import render_puzzle
 from .trials import (
     DEFAULT_TRIALS_DIR,
@@ -48,6 +48,7 @@ DIFFICULTY_CLUES = {
 DEFAULT_HARNESS_CMD = "sudoku-agent-harness"
 DEFAULT_HARNESS_ID = "harness"
 DEFAULT_GRADER_MODEL = "google/gemini-2.0-flash-001"
+DEFAULT_VISION_MIDDLEWARE_CMD = ["python", "vision-middleware/transcribe.py"]
 
 
 class Benchmark:
@@ -63,10 +64,14 @@ class Benchmark:
         harness_id=DEFAULT_HARNESS_ID,
         grader_model=DEFAULT_GRADER_MODEL,
         harness_timeout=300,
+        fresh=False,
         verbose=False,
         trials_dir=DEFAULT_TRIALS_DIR,
         expensive_models=None,
         model_categories=None,
+        vision_middleware=False,
+        vision_middleware_cmd=None,
+        vision_middleware_config=None,
     ):
         self.models = models
         self.n_puzzles = n_puzzles
@@ -78,11 +83,19 @@ class Benchmark:
         self.harness_id = harness_id
         self.grader_model = grader_model
         self.harness_timeout = harness_timeout
+        self.fresh = fresh
         self.verbose = verbose
         self.trials_dir = Path(trials_dir) if trials_dir else None
         self.expensive_models = set(expensive_models or [])
         # model_categories maps model_id → TOML section name (e.g. "open-weight", "proprietary")
         self.model_categories = model_categories or {}
+        self.vision_middleware = vision_middleware
+        self.vision_middleware_cmd = (
+            shlex.split(vision_middleware_cmd) if isinstance(vision_middleware_cmd, str)
+            else list(vision_middleware_cmd) if vision_middleware_cmd is not None
+            else DEFAULT_VISION_MIDDLEWARE_CMD
+        )
+        self.vision_middleware_config = vision_middleware_config
 
     def generate_puzzles(self):
         if self.seed is not None:
@@ -131,6 +144,11 @@ class Benchmark:
             "--output-dir", str(solutions_dir),
             "--timeout", str(self.harness_timeout),
         ]
+        # Without this the harness resumes: rounds it already completed for
+        # this model against this exact puzzle set are replayed from its state
+        # file rather than re-run.
+        if self.fresh:
+            argv.append("--fresh")
         # Strip VIRTUAL_ENV so `uv run --project ...` doesn't warn about the
         # benchmarker's active venv clashing with the harness's project venv.
         env = {k: v for k, v in os.environ.items() if k != "VIRTUAL_ENV"}
@@ -341,6 +359,96 @@ class Benchmark:
         results.sort(key=lambda r: r["puzzle_id"])
         return results, summary
 
+    async def _transcribe_puzzle(self, puzzle, img_dir, semaphore):
+        """Run the vision middleware for one puzzle image.
+
+        Returns (puzzle_id, transcription_text) or (puzzle_id, None) on
+        failure. Nothing is written to disk: the text goes into the task spec
+        as the image's alt text, which is the only channel the harness reads.
+        """
+        pid = puzzle["id"]
+        image_path = img_dir / f"puzzle_{pid:03d}.png"
+
+        async with semaphore:
+            task_desc = (
+                "Solve a 9x9 Sudoku puzzle. The image shows a partially filled "
+                "9x9 grid with some digits (clues) already placed and empty "
+                "cells to fill. Transcribe the grid in a clear text format "
+                "(e.g. a 9-line grid with digits and dots/zeros for blanks) "
+                "so that someone who cannot see the image can solve the puzzle."
+            )
+            argv = list(self.vision_middleware_cmd) + [
+                "--image", str(image_path),
+                "--task", task_desc,
+            ]
+            if self.vision_middleware_config:
+                argv += ["--config", str(self.vision_middleware_config)]
+
+            try:
+                proc = await asyncio.create_subprocess_exec(
+                    *argv,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                )
+                stdout, stderr = await proc.communicate()
+                if proc.returncode != 0:
+                    print(
+                        f"  [vision-middleware] puzzle {pid}: FAILED "
+                        f"(exit {proc.returncode}): "
+                        f"{stderr.decode(errors='replace')[:200]}",
+                        flush=True,
+                    )
+                    return pid, None
+                text = stdout.decode(errors="replace").strip()
+                if not text:
+                    # Exit 0 with nothing on stdout is a failure, not a
+                    # transcription; counting it would put an empty block in
+                    # the prompt under text telling the model to rely on it.
+                    print(
+                        f"  [vision-middleware] puzzle {pid}: FAILED "
+                        f"(exit 0 but no output)",
+                        flush=True,
+                    )
+                    return pid, None
+                print(
+                    f"  [vision-middleware] puzzle {pid}: OK "
+                    f"({len(text)} chars)",
+                    flush=True,
+                )
+                return pid, text
+            except Exception as e:
+                print(
+                    f"  [vision-middleware] puzzle {pid}: ERROR "
+                    f"{type(e).__name__}: {e}",
+                    flush=True,
+                )
+                return pid, None
+
+    async def _run_vision_middleware(self, puzzles, img_dir):
+        """Transcribe every puzzle image through the vision middleware.
+
+        Returns (transcriptions, n_ok): a dict mapping puzzle id → alt text for
+        EVERY puzzle, and how many of those are real transcriptions. A puzzle
+        the middleware failed on still gets an entry, carrying
+        ``TRANSCRIPTION_UNAVAILABLE`` — the prompts are shared across rounds,
+        so the alt attribute is always rendered and a missing entry would show
+        the model an empty one.
+        """
+        semaphore = asyncio.Semaphore(self.concurrency)
+        tasks = [
+            asyncio.create_task(self._transcribe_puzzle(p, img_dir, semaphore))
+            for p in puzzles
+        ]
+        transcriptions, n_ok = {}, 0
+        for coro in asyncio.as_completed(tasks):
+            pid, text = await coro
+            if text is None:
+                transcriptions[pid] = TRANSCRIPTION_UNAVAILABLE
+            else:
+                transcriptions[pid] = text
+                n_ok += 1
+        return transcriptions, n_ok
+
     def summarize(self, model, results, session_summary=None):
         """Per-model metrics. The implementation lives in get_leaderboard.py so that
         summarize_results.py can rebuild the identical numbers from disk."""
@@ -385,6 +493,7 @@ class Benchmark:
                 n_puzzles=self.n_puzzles,
                 difficulty=self.difficulty,
                 fingerprint=fingerprint,
+                middleware=self.vision_middleware,
             )
         except ValueError as e:
             print(f"\nNot recording a trial: {e}")
@@ -393,8 +502,10 @@ class Benchmark:
         save_trial(path, trial)
 
         print(f"\n=== Trial {tid} ({path}) ===")
-        for model, what in changes.items():
-            print(f"  {what:<9} {model}")
+        for key, what in changes.items():
+            model, mw = key if isinstance(key, tuple) else (key, False)
+            mw_tag = " [mw]" if mw else ""
+            print(f"  {what:<9} {model}{mw_tag}")
         for model, why in excluded:
             print(f"  {'skipped':<9} {model} ({why})")
         print("  best-so-far standings:")
@@ -403,10 +514,11 @@ class Benchmark:
             img_col = (
                 f"  imgs={imgs}/{e.get('n_puzzles', '?')}" if imgs is not None else ""
             )
+            mw = "yes" if e.get("middleware") else " --"
             print(
                 f"    {i}. {e['model']}: acc={e['accuracy'] * 100:5.1f}%  "
                 f"avg={e['avg_elapsed_s']:6.2f}s  tokens={e.get('total_tokens', 0):>9,}"
-                f"{img_col}  (runs={e.get('runs', 1)})"
+                f"  mw={mw}{img_col}  (runs={e.get('runs', 1)})"
             )
 
     def _model_run_order(self, models):
@@ -490,7 +602,32 @@ class Benchmark:
         # The task itself — prompts, filenames, and the verifier the agent is
         # required to use — written where the harness can read it. Rewritten
         # every run so an edit to task.py takes effect immediately.
-        task_spec = write_task_spec(self.output_dir / "task.json")
+
+        transcriptions = None
+        if self.vision_middleware:
+            print(
+                f"\nRunning vision middleware "
+                f"({self.vision_middleware_cmd[0]}) on {len(puzzles)} puzzles..."
+            )
+            transcriptions, n_ok = asyncio.run(
+                self._run_vision_middleware(puzzles, img_dir)
+            )
+            print(
+                f"Vision middleware: {n_ok}/{len(puzzles)} puzzles transcribed"
+            )
+            if not n_ok:
+                # Every puzzle failed. Run the ordinary prompts rather than
+                # ones that promise alt text and carry only the failure notice.
+                print(
+                    "Vision middleware produced nothing — falling back to the "
+                    "standard prompts for this run."
+                )
+                transcriptions = None
+
+        task_spec = write_task_spec(
+            self.output_dir / "task.json",
+            transcriptions=transcriptions,
+        )
         print(f"Task spec for the harness: {task_spec}")
 
         # Calibrate the local vision reader once from the puzzle images we just
@@ -566,6 +703,7 @@ class Benchmark:
             )
 
             summary = self.summarize(model, results, session_summary)
+            summary["middleware"] = self.vision_middleware
             summaries.append(summary)
             print(f"\nSummary for {model}:")
             print(
