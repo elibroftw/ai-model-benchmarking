@@ -249,6 +249,23 @@ def load_costs(models_file):
     }
 
 
+def load_disabled_ids(models_file):
+    """Return the set of model IDs listed under ``[models] disabled``."""
+    path = Path(models_file)
+    if not path.exists():
+        return set()
+    try:
+        data = tomllib.loads(path.read_text())
+    except (tomllib.TOMLDecodeError, OSError):
+        return set()
+    disabled = set()
+    for entry in (data.get("models") or {}).get("disabled") or []:
+        model_id = entry.get("id") if isinstance(entry, dict) else entry
+        if isinstance(model_id, str):
+            disabled.add(model_id)
+    return disabled
+
+
 def puzzle_image_fingerprint(puzzle_images_dir):
     """Content hash of the rendered puzzle set, or None if it is missing.
 
@@ -489,6 +506,12 @@ def collect(results_dir, models_file=None, verify_images=True, solutions_dir=Non
         in_price, out_price = model_costs.get(s["model"], (0.0, 0.0))
         s["cost_per_1M_input"] = in_price
         s["cost_per_1M_output"] = out_price
+
+    # Drop models the manifest marks as disabled — they are noise.
+    disabled_ids = load_disabled_ids(models_file) if models_file else set()
+    if disabled_ids:
+        summaries = [s for s in summaries if s["model"] not in disabled_ids]
+        orphans = [o for o in orphans if o["model"] not in disabled_ids]
 
     return {
         "results_dir": str(results_dir),
@@ -734,6 +757,33 @@ def _cost_cell(summary):
     return f"${cost:.2f}"
 
 
+def _cost_per_hour_cell(summary):
+    """Dollars per wall-clock hour: how much the model burns per unit of time.
+
+    total_cost = (tok_in × in_price + tok_out × out_price) / 1e6
+    total_sec  = avg_elapsed_s × n_puzzles
+    $/h        = total_cost × 3600 / total_sec
+
+    Shown for every model that has both pricing and timing data, regardless
+    of score — it's an efficiency metric, not a correctness one.
+    """
+    in_price = summary.get("cost_per_1M_input", 0)
+    out_price = summary.get("cost_per_1M_output", 0)
+    if in_price == 0 and out_price == 0:
+        return "-"
+    if summary["n_puzzles"] == 0:
+        return "-"
+    total_sec = summary["avg_elapsed_s"] * summary["n_puzzles"]
+    if total_sec <= 0:
+        return "-"
+    total_cost = (
+        summary["input_tokens"] * in_price
+        + summary["output_tokens"] * out_price
+    ) / 1_000_000
+    cph = total_cost * 3600 / total_sec
+    return f"${cph:.2f}"
+
+
 def unverified_claims(report):
     """Models the harness called successful that no grading pass confirmed."""
     out = []
@@ -746,7 +796,7 @@ def unverified_claims(report):
     return out
 
 
-def format_text(report):
+def format_text(report, *, hide_errors=False):
     """Human-readable report for a terminal."""
     out = []
     mix = ", ".join(f"{k} {v}" for k, v in sorted(report["difficulty_mix"].items()))
@@ -785,18 +835,27 @@ def format_text(report):
     if not report["summaries"]:
         out.append("No per-model records or harness state found.")
     else:
-        out.append(
-            f"{'#':>2}  {'model':<38} {'type':>4} {'score':>7} {'cost':>8} {'claimed':>8} "
-            f"{'imgs':>6} {'avg s':>8} {'tok_in':>11} {'tok_out':>11} {'errs':>5}"
-        )
+        if hide_errors:
+            out.append(
+                f"{'#':>2}  {'model':<38} {'type':>4} {'score':>7} {'avg s':>8} {'cost':>8} {'$/h':>8} {'claimed':>8} "
+                f"{'imgs':>6} {'tok_in':>11} {'tok_out':>11}"
+            )
+        else:
+            out.append(
+                f"{'#':>2}  {'model':<38} {'type':>4} {'score':>7} {'avg s':>8} {'cost':>8} {'$/h':>8} {'claimed':>8} "
+                f"{'imgs':>6} {'tok_in':>11} {'tok_out':>11} {'errs':>5}"
+            )
         for i, s in enumerate(report["summaries"], 1):
             imgs = f"{s['n_output_images']}/{s['n_puzzles']}"
-            out.append(
+            row = (
                 f"{i:>2}  {s['model']:<38} {s.get('type', 'V'):>4} {_score_cell(s):>7} "
-                f"{_cost_cell(s):>8} {_claimed(s):>8} {imgs:>6} "
-                f"{s['avg_elapsed_s']:>8.1f} {s['input_tokens']:>11,} "
-                f"{s['output_tokens']:>11,} {s['n_errors']:>5}"
+                f"{s['avg_elapsed_s']:>8.1f} {_cost_cell(s):>8} {_cost_per_hour_cell(s):>8} "
+                f"{_claimed(s):>8} {imgs:>6} "
+                f"{s['input_tokens']:>11,} {s['output_tokens']:>11,}"
             )
+            if not hide_errors:
+                row += f" {s['n_errors']:>5}"
+            out.append(row)
         out.append("")
         out.append(
             "  score   = grader-verified correct when the grading API returned "
@@ -812,6 +871,9 @@ def format_text(report):
         )
         out.append(
             "            that answered every puzzle correctly."
+        )
+        out.append(
+            "  $/h     = cost per wall-clock hour (total_cost × 3600 / total_seconds)."
         )
         out.append(
             "  claimed = the harness's own success count from "
@@ -938,7 +1000,7 @@ def format_text(report):
             k = kinds.setdefault(kind, {"n": 0, "models": 0, "sample": info["sample"]})
             k["n"] += info["n"]
             k["models"] += 1
-    if kinds:
+    if kinds and not hide_errors:
         out.append("")
         out.append("Errors by kind:")
         for kind, info in sorted(kinds.items(), key=lambda kv: -kv[1]["n"]):
@@ -1001,7 +1063,7 @@ def grader_disagreements(report):
     return out
 
 
-def format_markdown(report):
+def format_markdown(report, *, hide_errors=False):
     """Same content as `format_text`, pasteable into a README or an issue."""
     mix = ", ".join(f"{k} {v}" for k, v in sorted(report["difficulty_mix"].items()))
     t = report["totals"]
@@ -1012,26 +1074,37 @@ def format_markdown(report):
         + (f" ({mix})" if mix else " (puzzles.json missing)")
         + f", {t['models']} models ({t['graded_models']} with run records).",
         "",
-        "| # | model | type | score | cost | claimed | images | avg s | tok_in | tok_out | errors |",
-        "|--:|---|:--:|--:|--:|--:|--:|--:|--:|--:|--:|",
     ]
+    if hide_errors:
+        out += [
+            "| # | model | type | score | avg s | cost | $/h | images | tok_in | tok_out |",
+            "|--:|---|:--:|--:|--:|--:|--:|--:|--:|--:|",
+        ]
+    else:
+        out += [
+            "| # | model | type | score | avg s | cost | $/h | images | tok_in | tok_out | errors |",
+            "|--:|---|:--:|--:|--:|--:|--:|--:|--:|--:|--:|",
+        ]
     for i, s in enumerate(report["summaries"], 1):
-        out.append(
+        row = (
             f"| {i} | `{s['model']}` | {s.get('type', 'V')} | {_score_cell(s)} | "
-            f"{_cost_cell(s)} | "
-            f"{_claimed(s)} | {s['n_output_images']}/{s['n_puzzles']} | "
-            f"{s['avg_elapsed_s']:.1f} | {s['input_tokens']:,} | "
-            f"{s['output_tokens']:,} | {s['n_errors']} |"
+            f"{s['avg_elapsed_s']:.1f} | {_cost_cell(s)} | {_cost_per_hour_cell(s)} | "
+            f"{s['n_output_images']}/{s['n_puzzles']} | "
+            f"{s['input_tokens']:,} | {s['output_tokens']:,}"
         )
+        if hide_errors:
+            row += " |"
+        else:
+            row += f" | {s['n_errors']} |"
+        out.append(row)
     out += [
         "",
         "`score` — grader-verified correct when the grading API returned verdicts, "
         "otherwise locally transcribed and checked against the clues and Sudoku "
         "rules. `cost` — total API spend at published OpenRouter prices, shown "
-        "only for models that answered every puzzle correctly. `claimed` — the "
-        "harness's own "
-        f"success count from `{HARNESS_STATE_FILENAME}`, the agent's word and "
-        "nothing more. Ranked on the same correctness signal that fills `score`.",
+        "only for models that answered every puzzle correctly. `$/h` — cost per "
+        "wall-clock hour. "
+        "Ranked on the same correctness signal that fills `score`.",
     ]
     check = report.get("image_check")
     if check is not None and not check["all_ok"]:
@@ -1042,12 +1115,6 @@ def format_markdown(report):
             f"verification was disabled."
         )
 
-    unverified = unverified_claims(report)
-    if unverified:
-        out += ["", "Claimed by the harness, more than anything verified:", ""]
-        for s, claimed, verified in unverified:
-            out.append(f"- `{s['model']}` — claimed {claimed}, verified {verified}")
-
     if report["ungraded_models"]:
         out += ["", "Solution dirs with neither records nor harness state:", ""]
         for o in report["ungraded_models"]:
@@ -1057,7 +1124,7 @@ def format_markdown(report):
     for s in report["summaries"]:
         for kind, info in s["errors"].items():
             kinds[kind] = kinds.get(kind, 0) + info["n"]
-    if kinds:
+    if kinds and not hide_errors:
         out += ["", "Errors by kind:", ""]
         for kind, n in sorted(kinds.items(), key=lambda kv: -kv[1]):
             out.append(f"- {n} record(s): {kind}")

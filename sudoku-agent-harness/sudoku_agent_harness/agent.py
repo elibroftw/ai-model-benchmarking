@@ -115,13 +115,36 @@ def default_archive_dir() -> Path:
 STATE_FILENAME = ".harness_state.json"
 
 
+def _strip_step_images(memory_step, agent=None) -> None:
+    """Drop the duplicate input image smolagents pins to every action step.
+
+    smolagents builds each `ActionStep` with `observations_images=images`,
+    where `images` is the exact list handed to `agent.run()`. Nothing in a
+    CodeAgent session ever replaces it (that hook exists for screenshot
+    agents), so the round's input image is re-attached to the conversation
+    once per step: by step 9 the request carries nine byte-identical copies
+    of the same PNG and providers refuse it outright — DeepInfra caps a
+    request at 8 images — and long before that the duplicates dominate the
+    input tokens.
+
+    The agent has already been shown this image in the round's task message,
+    which stays in memory, so the per-step copies add nothing. Registered as
+    a step callback, this clears each one as its step finishes, before the
+    next model call reads memory. That holds a round to exactly one image no
+    matter how many steps it takes.
+    """
+    if getattr(memory_step, "observations_images", None):
+        memory_step.observations_images = None
+
+
 def _drop_stale_images(agent) -> int:
     """Strip images from prior rounds out of the agent's memory.
 
     The session is deliberately persistent (`reset=False`), so every round's
-    input image stays in the conversation. By round 9 the request carries 9
-    images and providers start refusing it outright — DeepInfra caps at 8 —
-    and long before that the image tokens dwarf everything else.
+    input image would otherwise stay in the conversation for the rest of the
+    run, costing image tokens on every later request for a puzzle already
+    answered. `_strip_step_images` caps a single round at one image; this
+    keeps the count at one across rounds too.
 
     Only the pixels are dropped. Whatever the agent wrote about each input in
     its reasoning is untouched, so it keeps the session memory the benchmark
@@ -178,6 +201,118 @@ def _preload_imaging(agent) -> None:
         })
     except Exception as e:  # noqa: BLE001 - convenience only
         print(f"[harness] could not preload PIL: {e!r}", file=sys.stderr)
+
+
+# Environment variables through which a child process can reach the desktop
+# session of whoever is running the benchmark. `subprocess` is an authorized
+# import, so the agent can invoke `xdg-open` — or a browser, or a file manager
+# — directly, without going anywhere near PIL. Stripped for the duration of a
+# session so such a command has nothing to attach to. Nothing the harness
+# itself needs reads any of them: the model API is HTTPS, and the task's
+# verifier is plain Python over pixels.
+DESKTOP_ENV_VARS = (
+    "DISPLAY",
+    "WAYLAND_DISPLAY",
+    "DBUS_SESSION_BUS_ADDRESS",
+    "XDG_RUNTIME_DIR",
+    "XDG_CURRENT_DESKTOP",
+    "XDG_SESSION_TYPE",
+)
+
+
+def _disarm_image_viewers() -> None:
+    """Stop the agent from opening image windows on the operator's desktop.
+
+    `Image` is preloaded into the interpreter and `im.show()` is a method
+    call, so neither the import allowlist nor the interpreter's guard on
+    un-registered builtins stands in its way. PIL's Linux viewer chain ends
+    in `subprocess.Popen(["xdg-open", path])`, which hands the file to the
+    desktop's default application; pointed at a directory, `xdg-open` opens a
+    file manager. An agent that cannot quite make out a cell reaches for
+    "let me look at it", and windows start appearing on the machine running
+    the benchmark — which is not the machine the agent is reasoning about.
+
+    A viewer the agent cannot see returns it nothing, so this empties PIL's
+    viewer registry and makes `show()` a no-op that says what happened.
+    Patching the class and the module (not a copy) covers every image object,
+    including any created before this ran. Best-effort.
+    """
+    try:
+        import PIL.Image, PIL.ImageShow
+
+        PIL.ImageShow._viewers.clear()
+
+        def _no_show(self, title=None, **options):
+            print(
+                "[harness] Image.show() is disabled — the harness runs "
+                "headless, so there is no display for it to reach. Save the "
+                "image to a file instead.",
+                file=sys.stderr,
+            )
+            return None
+
+        PIL.Image.Image.show = _no_show
+        PIL.ImageShow.show = lambda image, title=None, **options: False
+    except Exception as e:  # noqa: BLE001 - hardening is best-effort
+        print(f"[harness] could not disarm image viewers: {e!r}", file=sys.stderr)
+
+
+def _detach_from_desktop() -> dict:
+    """Drop the desktop session out of the environment children inherit.
+
+    Returns the previous values, for `_restore_env` to put back when the
+    session ends. Covers the `subprocess` route that `_disarm_image_viewers`
+    cannot: without a display, a session bus, or a runtime dir, `xdg-open`
+    and friends have nothing to hand a file to.
+    """
+    saved: dict = {}
+    for name in DESKTOP_ENV_VARS:
+        if name in os.environ:
+            saved[name] = os.environ.pop(name)
+    # Anything honoring BROWSER (webbrowser, xdg-open's fallback) gets a
+    # command that succeeds at doing nothing.
+    saved["BROWSER"] = os.environ.get("BROWSER")
+    os.environ["BROWSER"] = "/bin/false"
+    return saved
+
+
+def _restore_env(saved: dict) -> None:
+    """Put back what `_detach_from_desktop` removed."""
+    for name, value in saved.items():
+        if value is None:
+            os.environ.pop(name, None)
+        else:
+            os.environ[name] = value
+
+
+def _allow_open(agent) -> None:
+    """Make the builtin `open` callable inside the agent's interpreter.
+
+    smolagents' interpreter exposes only an allowlist of builtins
+    (`BASE_PYTHON_TOOLS`), and `open` is not on it. The obvious way to save a
+    scratch file — `with open("notes.txt", "w") as f:` — therefore dies with
+    "Forbidden function evaluation: 'open' is not among the explicitly allowed
+    tools", and the agent spends a step rediscovering `pathlib`. Same class of
+    paper cut as `_preload_imaging`.
+
+    This grants nothing the session did not already have: `os`, `pathlib`,
+    `shutil` and `subprocess` are all authorized imports, and a task that asks
+    the agent to build reusable infrastructure is asking it to write files.
+
+    Registered through `additional_functions`, not `send_variables`, for two
+    reasons: `CodeAgent.run()` rebuilds the interpreter's tool table from that
+    dict at the start of every round, so the registration survives the whole
+    session; and a name merely present in interpreter state would still trip
+    the separate guard against calling builtins that were never registered as
+    tools. Best-effort.
+    """
+    try:
+        executor = agent.python_executor
+        executor.additional_functions["open"] = open
+        # Effective immediately; run() would otherwise pick it up next round.
+        executor.send_tools({**agent.tools, **agent.managed_agents})
+    except Exception as e:  # noqa: BLE001 - convenience only
+        print(f"[harness] could not authorize open(): {e!r}", file=sys.stderr)
 
 
 def _install_assets(td: Path, assets) -> int:
@@ -472,7 +607,9 @@ def run(
         stream_outputs=True,
         # CodeAgent takes no `timeout` kwarg; the per-round budget is enforced
         # between steps by this callback instead.
-        step_callbacks=[deadline],
+        # `_strip_step_images` first, so the round's images are pruned even on
+        # the step where the deadline fires (a raising callback stops the rest).
+        step_callbacks=[_strip_step_images, deadline],
         # With stream_outputs=True, smolagents renders the live token stream
         # (and all its other logging) through its logger's rich Console, which
         # defaults to stdout. stdout is our JSONL stats channel, so send the
@@ -487,6 +624,8 @@ def run(
     # stderr for the whole session. smolagents (and anything the agent's own
     # code prints) would otherwise corrupt the machine-readable stdout channel.
     _preload_imaging(agent)
+    _allow_open(agent)
+    _disarm_image_viewers()
 
     # May be flipped to False on the first round if the provider rejects
     # images; the agent is then told to read input.png itself.
@@ -516,6 +655,7 @@ def run(
                 file=sys.stderr,
             )
         os.chdir(td)
+        saved_env = _detach_from_desktop()
         sys.stdout = sys.stderr
         try:
             n_rounds = len(input_paths)
@@ -571,8 +711,8 @@ def run(
                     file=sys.stderr,
                     flush=True,
                 )
-                # Prior rounds' images would otherwise pile up in the
-                # conversation until providers reject the request.
+                # Prior rounds' input images would otherwise pile up in the
+                # conversation, one per round, for the rest of the session.
                 if send_images and not first_executed:
                     n_dropped = _drop_stale_images(agent)
                     if n_dropped:
@@ -671,6 +811,7 @@ def run(
         finally:
             _save_state(output_dir, model_id, fingerprint, rounds, task_name)
             sys.stdout = jsonl_out
+            _restore_env(saved_env)
             os.chdir(cwd)
             # Must happen before the TemporaryDirectory context exits and
             # deletes everything, and in `finally` so a crashed session is

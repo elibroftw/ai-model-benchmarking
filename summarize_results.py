@@ -59,6 +59,11 @@ def main(argv=None):
              "from the run's grader verdicts, where it got any.",
     )
     parser.add_argument(
+        "--hide-errors",
+        action="store_true",
+        help="Omit the `errors` column and the error-kind breakdown.",
+    )
+    parser.add_argument(
         "--format",
         choices=("text", "markdown", "json"),
         default="text",
@@ -111,9 +116,9 @@ def main(argv=None):
         if args.format == "json":
             text = json.dumps(report, indent=2)
         elif args.format == "markdown":
-            text = format_markdown(report)
+            text = format_markdown(report, hide_errors=args.hide_errors)
         else:
-            text = format_text(report)
+            text = format_text(report, hide_errors=args.hide_errors)
 
         # Prefix every report with a harness heading when there is more than
         # one solutions dir.

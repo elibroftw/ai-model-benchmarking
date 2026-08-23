@@ -2,6 +2,8 @@
 
 The purpose of this benchmark is an intelligent test based on SIMPLE Rules where experience does help, but unlike chess there is no need to memorize anything but the rules and some common patterns.
 
+[Read results of latest trial](/trials/README.md)
+
 ## Running
 
 ```sh
