@@ -1,22 +1,25 @@
 # Vision Middleware — model configuration.
 #
-# The vision middleware sends puzzle images to a vision-capable model
-# (via OpenRouter) to produce a detailed text transcription.  The
-# transcription is then handed to the solving agent alongside (or
-# instead of) the image, so text-only models can participate fairly.
+# The vision middleware sends an image + task description to a vision-capable model
+# (via OpenRouter) to produce a detailed text transcription that is supposed to help another AI model complete.
 #
-# The model here should be strong at image description, affordable,
-# and available through OpenRouter's chat completions API.
+# This specific example of a vision middleware is used to create a transcription of sudoku puzzles
+# that are handed to the solving agent alongside the image itself (for vision-capable models).
+#
+# We are looking for: high quality description, fast, affordable
 
+# TODO: benchmark vision models by quality (human-rated), ai-quality (llm-performance), and speed (stat)
+# INSPO:
+# - https://www.reddit.com/r/LocalLLaMA/comments/1vyw1wo/forget_the_pelican_its_weeviltime/
+# - https://www.reddit.com/r/LocalLLaMA/comments/1vp3zqc/a_nice_local_vision_test/
+# - existing benchmarks: https://vlm-benchmarks-search.vercel.app/
+# - OCR 1: https://mbzuai-nlp.github.io/TABVERSE/leaderboard.html
 [vision]
-# OpenRouter model ID for the image-transcription step.
-model = "google/gemini-2.0-flash-001"
+# only open-weight to prevent training on transcribing tasks
+# gemma4 is really fucking fast and good at this
+model = "google/gemma-4-26b-a4b-it"
 
-# OpenRouter API key source: either a literal value here, or the
-# OPENROUTER_API_KEY environment variable (the default).
-# api_key = "sk-or-v1-..."
-
-# OpenRouter chat completions endpoint.
+# OpenAI-compatible API endpoint
 api_base = "https://openrouter.ai/api/v1"
 
 # Inference knobs passed through to the completion call.

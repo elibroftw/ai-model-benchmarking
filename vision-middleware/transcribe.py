@@ -26,13 +26,23 @@ import httpx
 SYSTEM_PROMPT = (
     "You are an image-transcriber. You transcribe images such that the "
     "output can be used to complete the task that is also provided. Your "
-    "output will be placed as the alt of an img html tag. Do not complete "
-    "the task. Use the task description to infer what about the image "
+    "output will be placed as the alt of an img html tag. Do not return an img tag with an alt field."
+    "Do not complete the task. Use the task description to infer what about the image "
     "would be useful for someone who would not be able to see the image "
     "for themselves. Do not attempt to complete the task given."
 )
 
 DEFAULT_CONFIG = Path(__file__).resolve().parent / "models.toml"
+
+# Exit code for a failure that every later call would repeat: a model ID the
+# endpoint does not serve, a rejected key, a malformed config. Callers that
+# transcribe a whole batch use it to stop rather than retry the same mistake
+# once per image.
+EXIT_CONFIG_ERROR = 3
+
+
+class ConfigError(RuntimeError):
+    """A failure that re-running with the same configuration cannot fix."""
 
 
 def load_config(path: Path) -> dict:
@@ -116,8 +126,18 @@ def transcribe(
         resp = httpx.post(url, json=payload, headers=headers, timeout=120.0)
         resp.raise_for_status()
     except httpx.HTTPStatusError as e:
+        status = e.response.status_code
+        detail = e.response.text[:200].strip()
+        # 402 is an exhausted account, 429 is deliberately absent: that one
+        # is transient and worth retrying.
+        if status in (400, 401, 402, 403, 404):
+            raise ConfigError(
+                f"OpenRouter HTTP {status} for model '{model}': {detail or e}. "
+                f"The model ID or the key is wrong — every image would fail "
+                f"the same way."
+            ) from e
         raise RuntimeError(
-            f"OpenRouter HTTP {e.response.status_code} for model '{model}': {e}"
+            f"OpenRouter HTTP {status} for model '{model}': {e}"
         ) from e
 
     data = resp.json()
@@ -163,6 +183,9 @@ def main() -> int:
             task=args.task,
             config_path=args.config,
         )
+    except ConfigError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return EXIT_CONFIG_ERROR
     except Exception as e:
         print(f"error: {type(e).__name__}: {e}", file=sys.stderr)
         return 1

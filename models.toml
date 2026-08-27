@@ -27,7 +27,8 @@ open-weight = [
     "deepseek/deepseek-v4-pro-0813",
     "~deepseek/deepseek-v4-flash-latest",
     "z-ai/glm-5.3",
-    "z-ai/glm-5.2",
+    "z-ai/glm-5.3-flash",
+    "qwen/qwen3.8-2.4t-a95b",
     # TODO: evaluate https://ornith.ai/ornith_1_5.html
 ]
 
@@ -95,6 +96,7 @@ disabled = [
 "~deepseek/deepseek-v4-flash-latest" = [0.065, 0.18]
 "z-ai/glm-5.2" = [0.336, 1.056]
 "z-ai/glm-5.3" = [1.40, 4.40]
+"z-ai/glm-5.3-flash" = [0.15, 0.5]
 "qwen/qwen3.8-27b" = [0.40, 3.00]
 "qwen/qwen3.8-2.4t-a95b" = [2.00, 6.00]
 "deepseek/deepseek-v4-flash-vision-exp" = [0.22, 0.66]
@@ -118,3 +120,7 @@ disabled = [
 "anthropic/claude-sonnet-5" = [2, 10]
 "anthropic/claude-haiku-4.5" = [1, 5]
 "x-ai/grok-4.6" = [2, 6]
+
+[vision]
+# used for converting completed sudoku to be graded as well as the vision middleware for converting puzzles into transcriptions
+model = "google/gemma-4-26b-a4b-it"

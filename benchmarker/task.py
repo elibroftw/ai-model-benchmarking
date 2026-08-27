@@ -240,7 +240,7 @@ VISION_WITH_MIDDLEWARE_SECTION = """## Reading the puzzle
 
 The image also carries a transcription of its contents as alt text.  Use the alt text as your primary source for the clue digits and their positions — it should save you from reading every digit off the image:
 
-<img src="{input_filename}" alt="{transcription}" />
+<img src="{input_filename}" alt="\n{transcription}" />
 
 Cross-check a few cells against the attached image to confirm the transcription is accurate.  If you find a discrepancy, trust the image and correct that cell in your reasoning.  A misread clue wastes the whole round.
 
@@ -251,7 +251,7 @@ TEXT_ONLY_WITH_MIDDLEWARE_SECTION = """## Reading the puzzle
 
 **The puzzle image is on disk as `{input_filename}` for rendering purposes only.** You cannot see it, so its contents are described to you as alt text:
 
-<img src="{input_filename}" alt="{transcription}" />
+<img src="{input_filename}" alt="\n{transcription}" />
 
 You do **not** need to extract the digits from the image — the alt text has them.  Use `input.png` **only** for its geometry: image dimensions, grid bounds, cell size, and as the base image to draw the solution onto.
 
@@ -322,7 +322,7 @@ def build_spec_with_transcriptions(transcriptions: dict[int, str] | None = None)
         + "\n\nThis puzzle's image carries its own alt text.  Use it as your "
           "primary source for the clue digits, cross-checking a few cells "
           "against the attached image:\n\n"
-          "<img src=\"{input_filename}\" alt=\"{transcription}\" />",
+          "<img src=\"{input_filename}\" alt=\"\n{transcription}\" />",
     )
     text_next = NEXT_PUZZLE_PROMPT.replace(
         "{next_reading_line}",
@@ -330,7 +330,7 @@ def build_spec_with_transcriptions(transcriptions: dict[int, str] | None = None)
         + "\n\nThis puzzle's contents are described to you as alt text, so "
           "you do not need to extract the digits.  Use `{input_filename}` "
           "only for its geometry.\n\n"
-          "<img src=\"{input_filename}\" alt=\"{transcription}\" />",
+          "<img src=\"{input_filename}\" alt=\"\n{transcription}\" />",
     )
 
     spec["prompts"] = {

@@ -117,12 +117,12 @@ def main():
     types = load_types(args.models_file)
 
     headers = [
-        "| # | model | type | mw | score | avg s | cost | $/h | images | tok_in | tok_out",
+        "| # | model | type | mw | rev | score | avg s | cost | $/h | images | tok_in | tok_out",
     ]
     if not args.hide_errors:
         headers[0] += " | errors"
     headers.append(
-        "|--:|---|:--:|:--:|--:|--:|--:|--:|--:|--:|--:" +
+        "|--:|---|:--:|:--:|:--|--:|--:|--:|--:|--:|--:|--:" +
         ("|--:" if not args.hide_errors else "|")
     )
 
@@ -133,7 +133,8 @@ def main():
         imgs = f"{e['n_output_images']}/{e['n_puzzles']}"
         row = (
             f"| {i} | `{e['model']}` | {types.get(e['model'], 'V')} | {mw} | "
-            f"{score} | {e['avg_elapsed_s']:.1f} | {_cost_cell(e, costs)} | "
+            f"{e.get('rev') or '?'} | "
+            f"{score} | {e['avg_elapsed_s']:.1f}s | {_cost_cell(e, costs)} | "
             f"{_cost_hour(e, costs)} | {imgs} | {e['input_tokens']:,} | "
             f"{e['output_tokens']:,}"
         )
@@ -150,6 +151,8 @@ def main():
         f"seed={trial['seed']}, "
         f"updated {trial.get('updated_at', '?')}.  "
         f"`mw` — vision middleware active (yes / --).  "
+        f"`rev` — commit the recorded run was made from, `-dirty` when source "
+        f"differed from it (`?` predates the field).  "
         f"`cost` — total spend at OpenRouter prices, perfect models only.  "
         f"`$/h` — cost per wall-clock hour."
     )

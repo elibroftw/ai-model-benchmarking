@@ -20,6 +20,7 @@ import argparse
 import random
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -220,8 +221,8 @@ def main() -> int:
         description="Transcribe a freshly generated Sudoku puzzle image."
     )
     parser.add_argument(
-        "--seed", type=int, default=42,
-        help="Seed for the puzzle generator (default: 42, so the same puzzle "
+        "--seed", type=int, default=43,
+        help="Seed for the puzzle generator (default: 43, so the same puzzle "
              "comes back every run).",
     )
     parser.add_argument(
@@ -233,6 +234,7 @@ def main() -> int:
         help="Where to write the puzzle PNG.  Default: a temporary file, "
              "deleted when the run finishes.",
     )
+    parser.add_argument("--keep", default=False, help="keep puzzle image", action='store_true')
     parser.add_argument(
         "--config", type=Path, default=None,
         help="Path to the middleware's models.toml (default: the one beside "
@@ -269,11 +271,13 @@ def main() -> int:
         print(task)
         print("=== end task description ===\n")
 
-    with tempfile.TemporaryDirectory(prefix="vision-middleware-example-") as td:
+    text = None
+    with tempfile.TemporaryDirectory(prefix="vision-middleware-example-", delete=not args.keep) as td:
         image_path = args.out if args.out is not None else Path(td) / "puzzle.png"
         image_path.write_bytes(png)
         print(f"[example] puzzle image: {image_path}", file=sys.stderr)
 
+        started = time.perf_counter()
         try:
             text = transcribe(
                 image_path=image_path,
@@ -281,8 +285,15 @@ def main() -> int:
                 config_path=args.config,
             )
         except Exception as e:
-            print(f"error: {type(e).__name__}: {e}", file=sys.stderr)
+            elapsed = time.perf_counter() - started
+            print(f"error after {elapsed:.2f}s: {type(e).__name__}: {e}",
+                  file=sys.stderr)
             return 1
+        elapsed = time.perf_counter() - started
+    if text is None:
+        raise RuntimeError('text is NONE. failed to transcribe')
+    elif text.lower().strip() == 'none':
+        raise RuntimeError('failed to transcribe')
 
     print("=== transcription ===")
     print(text)
@@ -292,6 +303,7 @@ def main() -> int:
         "first; the solution is not shown, since transcribing is not solving.",
         file=sys.stderr,
     )
+    print(f"[example] transcribe() returned in {elapsed:.2f}s", file=sys.stderr)
     return 0
 
 

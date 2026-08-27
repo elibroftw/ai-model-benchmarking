@@ -95,14 +95,36 @@ so a prompt containing braces cannot break a run.
 Streaming JSONL. One line per round as it finishes:
 
 ```json
-{"item_id": 0, "item_name": "puzzle_000.png", "round": 1, "success": true, "elapsed": 42.1, "final_answer": "..."}
-{"item_id": 1, "item_name": "puzzle_001.png", "round": 2, "success": true, "elapsed": 8.7, "final_answer": "..."}
+{"item_id": 0, "item_name": "puzzle_000.png", "round": 1, "middleware": true, "success": true, "elapsed": 42.1, "final_answer": "..."}
+{"item_id": 1, "item_name": "puzzle_001.png", "round": 2, "middleware": true, "success": true, "elapsed": 8.7, "final_answer": "..."}
 ```
 
 `item_id` is the trailing number in the input's filename, so a caller can
 correlate a round with the input it supplied without the harness knowing what
 the inputs mean. (`puzzle_id` / `puzzle_name` were the pre-rename names;
 readers on both sides still accept them, so old state files keep resuming.)
+
+`middleware` says whether the task spec supplied a transcription for that
+round's input — whether the model was given alt text for the image or left to
+read it itself. It is per round, not per run: a resumed session can replay
+rounds that ran the other way, and the two are not comparable. Records written
+before this field existed simply lack the key.
+
+When the spec supplies a transcription, the text is saved to
+`transcriptions/<input stem>.txt` under the output dir and the round record
+points at it with `transcription_file` (plus `transcription_chars`). The
+prompt is otherwise the only place that text ever existed, and a run's timings
+cannot be audited without it.
+
+`attempts` is how many times the round was run. It is 1 unless the generation
+failed for a reason that may not recur — a provider dropping out
+mid-generation, which OpenRouter reports by injecting an error into the SSE
+stream and litellm surfaces as a `MidStreamFallbackError`, or a 5xx, or a
+dropped connection — in which case the round is re-attempted (twice, with a
+growing delay) rather than left as a hole in the run. The round's `elapsed`
+and token counts cover every attempt. Retries are handled here rather than by
+litellm's own `num_retries`, which needs tenacity and fails the generation
+outright when it is absent.
 
 A final summary line closes the run:
 

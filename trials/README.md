@@ -11,23 +11,24 @@ After running the benchmark, even if it fails mid-way the following command read
 | # | model | type | mw | score | avg s | cost | $/h | images | tok_in | tok_out |
 |--:|---|:--:|:--:|--:|--:|--:|--:|--:|--:|--:|
 | 1 | `openai/gpt-5.6-terra` | V | -- | 3/3 | 66.2 | $0.77 | $13.95 | 3/3 | 260,255 | 20,740 |
+| 2 | `openai/gpt-5.6-sol` | V | yes | 3/3 | 70.5s | $0.37 | $6.25 | 3/3 | 48,229 | 17,419 |
 | 3 | `openai/gpt-5.6-terra-pro` | V | -- | 3/3 | 97.1 | $1.73 | $21.36 | 3/3 | 464,384 | 66,577 |
-| 4 | `openai/gpt-5.6-sol` | V | -- | 3/3 | 97.9 | $0.70 | $8.55 | 3/3 | 119,367 | 22,039 |
-| 5 | `anthropic/claude-opus-5` | V | -- | 3/3 | 99.7 | $1.48 | $17.83 | 3/3 | 154,825 | 28,293 |
-| 6 | `anthropic/claude-fable-5` | V | -- | 3/3 | 131.4 | $3.83 | $34.97 | 3/3 | 195,142 | 37,557 |
-| 7 | `openai/gpt-5.6-sol-pro` | V | -- | 3/3 | 141.4 | $1.78 | $15.08 | 3/3 | 288,251 | 62,336 |
-| 8 | `meta/muse-spark-1.2` | V | -- | 3/3 | 190.3 | $1.24 | $7.80 | 3/3 | 602,540 | 113,661 |
+| 4 | `anthropic/claude-opus-5` | V | -- | 3/3 | 99.7 | $1.48 | $17.83 | 3/3 | 154,825 | 28,293 |
+| 5 | `anthropic/claude-fable-5` | V | -- | 3/3 | 131.4 | $3.83 | $34.97 | 3/3 | 195,142 | 37,557 |
+| 6 | `openai/gpt-5.6-sol-pro` | V | -- | 3/3 | 141.4 | $1.78 | $15.08 | 3/3 | 288,251 | 62,336 |
+| 7 | `meta/muse-spark-1.2` | V | -- | 3/3 | 142.4s | $0.62 | $5.22 | 3/3 | 158,599 | 99,192 |
+| 8 | `z-ai/glm-5.3-flash` | T | -- | 3/3 | 173.3s | $0.07 | $0.50 | 3/3 | 224,641 | 75,772 |
 | 9 | `anthropic/claude-sonnet-5` | V | -- | 3/3 | 212.3 | $1.59 | $9.00 | 3/3 | 417,092 | 75,732 |
-| 10 | `deepseek/deepseek-v4-pro-0813` | T | -- | 3/3 | 310.2 | $0.52 | $2.03 | 3/3 | 608,433 | 62,039 |
-| 11 | `z-ai/glm-5.3` | T | -- | 3/3 | 404.7 | $1.86 | $5.51 | 3/3 | 957,568 | 117,955 |
-| 12 | `x-ai/grok-4.6` | V | -- | 3/3 | 418.2 | $0.76 | $2.19 | 3/3 | 102,119 | 93,413 |
-| 13 | `moonshotai/kimi-k3` | V | -- | 3/3 | 499.2 | $3.89 | $9.35 | 3/3 | 900,394 | 119,054 |
-| 14 | `qwen/qwen3.8-max` | V | -- | 3/3 | 499.6 | $1.00 | $2.39 | 3/3 | 258,427 | 79,789 |
-| 15 | `~deepseek/deepseek-v4-flash-latest` | T | -- | 3/3 | 527.4 | $0.13 | $0.30 | 3/3 | 1,396,193 | 218,938 |
-| 16 | `z-ai/glm-5.2` | T | -- | 3/3 | 583.3 | $1.23 | $2.52 | 3/3 | 3,172,546 | 152,419 |
-| 17 | `qwen/qwen3.8-27b` | V | -- | 3/3 | 584.2 | $0.41 | $0.85 | 3/3 | 197,418 | 111,643 |
+| 10 | `deepseek/deepseek-v4-pro-0813` | T | yes | 3/3 | 273.3s | $0.25 | $1.09 | 3/3 | 183,190 | 64,437 |
+| 12 | `z-ai/glm-5.3` | T | -- | 3/3 | 404.7 | $1.86 | $5.51 | 3/3 | 957,568 | 117,955 |
+| 13 | `x-ai/grok-4.6` | V | -- | 3/3 | 418.2 | $0.76 | $2.19 | 3/3 | 102,119 | 93,413 |
+| 14 | `moonshotai/kimi-k3` | V | -- | 3/3 | 499.2 | $3.89 | $9.35 | 3/3 | 900,394 | 119,054 |
+| 15 | `qwen/qwen3.8-max` | V | -- | 3/3 | 499.6 | $1.00 | $2.39 | 3/3 | 258,427 | 79,789 |
+| 16 | `~deepseek/deepseek-v4-flash-latest` | T | -- | 3/3 | 527.4 | $0.13 | $0.30 | 3/3 | 1,396,193 | 218,938 |
+| 17 | `qwen/qwen3.8-27b` | V | -- | 3/3* | 527.9s | $0.35 | $0.79 | 3/3 | 138,624 | 97,426 |
+| 18 | `z-ai/glm-5.2` | T | -- | 3/3 | 583.3 | $1.23 | $2.52 | 3/3 | 3,172,546 | 152,419 |
 
-NOTE: Used non-discounted price for gpt-5.6-sol.
+NOTE: Non-discounted prices are used to calculate costs. As of 2026-08-26 this applies to gpt-5.6-sol and glm-5.3-flash.
 
 TODO: if an older model has lost in both correctness and cost effectiveness respective to being closed/open-weights, it should not be tested ever again (don't use preliminary results to filter models). Based on preliminary results, here are the models I would remove:
 
@@ -38,6 +39,28 @@ TODO: if an older model has lost in both correctness and cost effectiveness resp
   - This is a great example of why preliminary results should not be used to filter models, we need to increase quantity + difficulty
 - qwen3.8-27b, moonshotai/kimi-k3
   - I want to test unsloth's GGUF, so not yet
+
+## WIP: Vision Trials
+
+Vision improved not just text-only models like deepseek-v4-pro, but also vision-capable models like gpt-5.6-sol. It seems that transcription reduces the time spent thinking by models that have higher capabilities. In other words, excessive thinking is reduced when transcriptions are provided. We can see that the transcriptions also significantly lowered tokens, which also significantly lowered costs (more so for deepseek v4 pro than gpt 5.6 sol).
+
+| # | model | type | mw | score | avg s | cost | $/h | images | tok_in | tok_out |
+|--:|---|:--:|:--:|--:|--:|--:|--:|--:|--:|--:|
+| - | `openai/gpt-5.6-sol` | V | yes | 3/3 | 70.5s | $0.37 | $6.25 | 3/3 | 48,229 | 17,419 |
+| - | `openai/gpt-5.6-sol` | V | -- | 3/3 | 97.9 | $0.70 | $8.55 | 3/3 | 119,367 | 22,039 |
+| - | `deepseek/deepseek-v4-pro-0813` | T | yes | 3/3 | 273.3s | $0.25 | $1.09 | 3/3 | 183,190 | 64,437 |
+| - | `deepseek/deepseek-v4-pro-0813` | T | -- | 3/3 | 310.2 | $0.52 | $2.03 | 3/3 | 608,433 | 62,039 |
+
+Some models saw worse performance, which to me suggests that these models weren't honestly thinking in the first place.
+Proper tracing is required to ensure these models did not cheat to begin with.
+
+These findings suggest that text-only models were able to cut down the time spent on parsing puzzles but they are still hard blocked on reasoning, which won't improve just because they have a text-only input.
+
+We're waiting on an open-source text-only model that actually has strong and efficient reasoning capabilities where a vision-middleware would be considered optimization.
+
+## More Findings
+
+- Muse spark improved on a second run of the preliminary results, going from 190seconds to 140 seconds (near openai and anthropic's frontier models).
 
 ## Models That Failed Preliminary Benchmark
 

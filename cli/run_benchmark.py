@@ -5,6 +5,7 @@ Usage:
     uv run cli/run_benchmark.py                             # reads models.toml
     uv run cli/run_benchmark.py --models-file custom.txt    # override file
     uv run cli/run_benchmark.py openai/gpt-4o ...           # override with positional args
+    uv run cli/run_benchmark.py --model glm-5.3-flash       # one model, by id or unique substring
 
 Every model in the run is graded on the SAME set of freshly-generated puzzles.
 """
@@ -26,6 +27,7 @@ from benchmarker.benchmark import (  # noqa: E402
     DEFAULT_GRADER_MODEL,
     DEFAULT_HARNESS_CMD,
     DEFAULT_HARNESS_ID,
+    FatalRunError,
 )
 from benchmarker.trials import DEFAULT_TRIALS_DIR  # noqa: E402
 
@@ -94,7 +96,8 @@ def _read_models_toml(path, skip_expensive=False):
                     f"{path}: [models].{category} entry #{i + 1} has no `id`."
                 )
             if category == DISABLED_CATEGORY:
-                skipped.append((model_id, note))
+                # do not log disabled models
+                continue
             elif expensive and skip_expensive:
                 skipped.append((model_id, note or "marked expensive"))
             else:
@@ -102,6 +105,70 @@ def _read_models_toml(path, skip_expensive=False):
                 if expensive:
                     expensive_ids.add(model_id)
     return enabled, skipped, expensive_ids
+
+
+def _manifest_entries(path):
+    """Every model in the manifest as {id: (category, expensive, note)}.
+
+    Unlike `_read_models_file` this keeps the disabled ones and ignores
+    --skip-expensive: it answers "what does the manifest say about this id?",
+    which is a different question from "what should this run cover?". Returns
+    an empty dict for a manifest that cannot be read, since a named model runs
+    with or without the manifest's blessing.
+    """
+    path = Path(path)
+    if not path.exists():
+        return {}
+    try:
+        if path.suffix != ".toml":
+            return {
+                line.strip(): (DEFAULT_CATEGORY, False, "")
+                for line in path.read_text().splitlines()
+                if line.strip() and not line.strip().startswith("#")
+            }
+        section = tomllib.loads(path.read_text()).get("models") or {}
+        entries = {}
+        for category, items in section.items():
+            if not isinstance(items, list):
+                continue
+            for item in items:
+                if isinstance(item, str):
+                    entries[item] = (category, False, "")
+                elif isinstance(item, dict) and item.get("id"):
+                    entries[item["id"]] = (
+                        category,
+                        bool(item.get("expensive")),
+                        item.get("note", ""),
+                    )
+        return entries
+    except (tomllib.TOMLDecodeError, OSError, TypeError):
+        return {}
+
+
+def _resolve_model_id(wanted, entries, parser):
+    """Turn what the user typed into one model ID.
+
+    An exact ID always wins. Otherwise a case-insensitive substring match
+    against the manifest resolves it, so `--model glm-5.3-flash` is enough for
+    `z-ai/glm-5.3-flash` — these IDs are long and typing the vendor prefix
+    adds nothing. An ambiguous abbreviation is an error listing the
+    candidates, never a guess: running the wrong model costs a full session.
+
+    Something the manifest has never heard of is returned as typed. The
+    manifest is a convenience here, not an allowlist — a model can be tried
+    before it is added.
+    """
+    if wanted in entries:
+        return wanted
+    matches = [mid for mid in entries if wanted.lower() in mid.lower()]
+    if len(matches) == 1:
+        return matches[0]
+    if len(matches) > 1:
+        parser.error(
+            f"--model {wanted!r} matches {len(matches)} models: "
+            f"{', '.join(sorted(matches))}. Use a full model ID."
+        )
+    return wanted
 
 
 def main():
@@ -114,6 +181,16 @@ def main():
         nargs="*",
         help="OpenRouter model IDs. If omitted, models are read from --models-file "
         f"(default: {DEFAULT_MODELS_FILE}).",
+    )
+    parser.add_argument(
+        "--model",
+        default=None,
+        help="Benchmark this ONE model instead of every enabled model in the "
+        "manifest. Accepts a full OpenRouter ID or any unique substring of one "
+        "(e.g. `glm-5.3-flash`). The model's category and `expensive` flag are "
+        "still taken from the manifest when it lists it; a model the manifest "
+        "does not list, or lists as disabled, runs anyway — naming it is the "
+        "decision. Mutually exclusive with positional model IDs.",
     )
     parser.add_argument(
         "--models-file",
@@ -226,10 +303,33 @@ def main():
     )
     args = parser.parse_args()
 
-    if args.models:
-        models = list(args.models)
-        expensive_ids = set()
-        model_categories = {}
+    if args.model and args.models:
+        parser.error(
+            "give either --model or positional model IDs, not both."
+        )
+
+    if args.model or args.models:
+        # Explicitly named models still inherit what the manifest knows about
+        # them — category (which orders the run) and the expensive flag — so a
+        # single-model run is scheduled and recorded exactly like the same
+        # model inside a full run.
+        entries = _manifest_entries(args.models_file or DEFAULT_MODELS_FILE)
+        if args.model:
+            models = [_resolve_model_id(args.model, entries, parser)]
+        else:
+            models = [_resolve_model_id(m, entries, parser) for m in args.models]
+        expensive_ids = {m for m in models if entries.get(m, (None, False))[1]}
+        model_categories = {
+            m: entries[m][0] for m in models if m in entries
+        }
+        for model_id in models:
+            known = entries.get(model_id)
+            if known is None:
+                print(f"  {model_id}: not in the manifest — running it anyway")
+            elif known[0] == DISABLED_CATEGORY:
+                note = f" ({known[2]})" if known[2] else ""
+                print(f"  {model_id}: disabled in the manifest{note} — "
+                      f"running it because you named it")
     else:
         path = args.models_file or DEFAULT_MODELS_FILE
         if not Path(path).exists():
@@ -282,7 +382,15 @@ def main():
         vision_middleware_cmd=args.vision_middleware_cmd,
         vision_middleware_config=args.vision_middleware_config,
     )
-    bench.run()
+    try:
+        bench.run()
+    except FatalRunError as e:
+        # A dead grader or transcriber model fails the same way for every
+        # model still queued, so the run stops here instead of spending the
+        # rest of the budget producing results nothing verified.
+        print(f"\nRun aborted: {e}", file=sys.stderr)
+        return 2
+    return 0
 
 
 if __name__ == "__main__":

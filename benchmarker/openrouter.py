@@ -5,6 +5,25 @@ import httpx
 
 CHAT_URL = "https://openrouter.ai/api/v1/chat/completions"
 
+
+# 4xx statuses that no retry and no other image can fix: an unknown or
+# retired model ID (400/404), a model with no image endpoint (404), a
+# rejected key (401/403), an exhausted account (402). 408 and 429 are left
+# out on purpose — those are transient, and the local reader covers them.
+FATAL_STATUSES = (400, 401, 402, 403, 404)
+
+
+class FatalAPIError(RuntimeError):
+    """An API failure that every later call would repeat.
+
+    Raised apart from other failures because it is not transient: a run that
+    shrugs it off spends its whole budget producing ungraded results.
+    """
+
+    def __init__(self, message, status=None):
+        super().__init__(message)
+        self.status = status
+
 GRADER_PROMPT = """You are looking at a rendered image of a 9x9 Sudoku grid.
 Extract the digits into a 9x9 JSON matrix in row-major order.
 
@@ -43,16 +62,18 @@ async def extract_grid(client, image_bytes, grader_model, timeout=120):
         resp = await client.post(CHAT_URL, json=payload, timeout=timeout)
         resp.raise_for_status()
     except httpx.HTTPStatusError as e:
-        if e.response.status_code == 404:
-            raise RuntimeError(
-                f"OpenRouter returned 404 for model '{grader_model}'. "
-                f"This usually means the model ID is not recognised. "
-                f"Check https://openrouter.ai/models for the correct ID. "
-                f"(Raw: {e})"
+        status = e.response.status_code
+        if status in FATAL_STATUSES:
+            detail = e.response.text[:200].strip()
+            raise FatalAPIError(
+                f"OpenRouter returned {status} for model '{grader_model}': "
+                f"{detail or e}. Check the model ID against "
+                f"https://openrouter.ai/models, and the account's key and "
+                f"credit.",
+                status=status,
             ) from e
         raise RuntimeError(
-            f"OpenRouter HTTP {e.response.status_code} for model "
-            f"'{grader_model}': {e}"
+            f"OpenRouter HTTP {status} for model '{grader_model}': {e}"
         ) from e
     data = resp.json()
     if "choices" not in data or not data["choices"]:

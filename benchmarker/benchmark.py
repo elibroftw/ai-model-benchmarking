@@ -17,18 +17,21 @@ import json
 import os
 import random
 import shlex
+import time
+import tomllib
 from pathlib import Path
 
 import httpx
 
 from .generator import generate_puzzle
 from .grader import parse_grader_response, verify
-from .openrouter import extract_grid
+from .openrouter import FatalAPIError, extract_grid
 from .get_leaderboard import summarize as _summarize
 from .task import TRANSCRIPTION_UNAVAILABLE, write_spec as write_task_spec
 from .renderer import render_puzzle
 from .trials import (
     DEFAULT_TRIALS_DIR,
+    _entry_key,
     _rank_key,
     load_trial,
     merge as merge_trial,
@@ -47,8 +50,31 @@ DIFFICULTY_CLUES = {
 
 DEFAULT_HARNESS_CMD = "sudoku-agent-harness"
 DEFAULT_HARNESS_ID = "harness"
-DEFAULT_GRADER_MODEL = "google/gemini-2.0-flash-001"
+DEFAULT_GRADER_MODEL = "google/gemma-4-26b-a4b-it"
 DEFAULT_VISION_MIDDLEWARE_CMD = ["python", "vision-middleware/transcribe.py"]
+
+# The middleware's exit code for a failure re-running cannot fix. Kept in
+# sync with EXIT_CONFIG_ERROR in vision-middleware/transcribe.py; any other
+# command used as the middleware should follow the same convention.
+MIDDLEWARE_EXIT_CONFIG_ERROR = 3
+
+# Graded per-model records go in their own subdirectory of the results dir.
+# The top level holds the run's shared artifacts — puzzles.json, task.json,
+# leaderboard.json, puzzle_images/, solutions-<harness>/ — and mixing one
+# JSON per model in among them made "which files are model records?" a
+# question of exclusion lists rather than location.
+FINAL_SUBDIR = "final"
+
+
+class FatalRunError(RuntimeError):
+    """A misconfiguration that makes the rest of the run worthless.
+
+    A dead grader model or a dead transcriber model fails identically for
+    every model still queued, so carrying on spends the budget producing
+    results nothing verified — and, with the middleware, results recorded as
+    if they had alt text they never got. Raised so the run stops at the first
+    occurrence instead of at the end of the model list.
+    """
 
 
 class Benchmark:
@@ -90,12 +116,21 @@ class Benchmark:
         # model_categories maps model_id → TOML section name (e.g. "open-weight", "proprietary")
         self.model_categories = model_categories or {}
         self.vision_middleware = vision_middleware
+        # Whether transcriptions actually reached the prompts. `middleware`
+        # in a result or a trial entry must mean "this run used alt text",
+        # not "alt text was requested" — otherwise a run that fell back is
+        # recorded as evidence about a middleware it never used.
+        self.vision_middleware_applied = False
         self.vision_middleware_cmd = (
             shlex.split(vision_middleware_cmd) if isinstance(vision_middleware_cmd, str)
             else list(vision_middleware_cmd) if vision_middleware_cmd is not None
             else DEFAULT_VISION_MIDDLEWARE_CMD
         )
         self.vision_middleware_config = vision_middleware_config
+        # puzzle id → seconds the middleware spent transcribing that
+        # image. Charged to every model's round for that puzzle, so a
+        # middleware run's times stay comparable with a run without it.
+        self.transcription_seconds = {}
 
     def generate_puzzles(self):
         if self.seed is not None:
@@ -122,6 +157,28 @@ class Benchmark:
             )
             print(f"  puzzle {i + 1}/{self.n_puzzles} ({tier})")
         return puzzles
+
+    def _transcription_charge(self, puzzle_id):
+        """Seconds of middleware time to add to this puzzle's round.
+
+        A transcription is produced once and reused by every model, but a
+        model running without the middleware pays for reading the image
+        inside its own round. Charging each model the time its puzzle's
+        transcription took keeps `elapsed` meaning the same thing on both
+        sides: what it cost to get that answer, whichever path produced it.
+        Without this, enabling the middleware looks like a free speedup —
+        the work moved out of the measured round rather than disappearing.
+
+        A failed transcription is charged too: the time was spent before the
+        round could start, and a middleware that fails slowly is not free.
+
+        None when the run had no middleware, so the record keeps the
+        harness's own figure untouched.
+        """
+        if not self.vision_middleware_applied:
+            return None
+        seconds = self.transcription_seconds.get(puzzle_id)
+        return round(seconds, 3) if seconds else None
 
     async def _run_harness_session(self, model, puzzles_dir, solutions_dir, task_spec):
         """Invoke the harness ONCE for the whole puzzle set.
@@ -230,8 +287,23 @@ class Benchmark:
             "output_image": solution_path.exists(),
         }
         if round_rec is not None:
-            record["elapsed"] = round_rec.get("elapsed")
+            # The round is charged its puzzle's transcription time (see
+            # `_transcription_charge`). The harness's own figure is kept
+            # beside it so the adjustment is visible rather than baked in.
+            harness_elapsed = round_rec.get("elapsed")
+            charge = self._transcription_charge(puzzle["id"])
+            record["harness_elapsed"] = harness_elapsed
+            record["transcription_elapsed"] = charge
+            record["elapsed"] = (
+                harness_elapsed + charge
+                if harness_elapsed is not None and charge
+                else harness_elapsed
+            )
             record["round"] = round_rec.get("round")
+            # Per round, not per run: a resumed session can replay rounds that
+            # ran the other way. Copied so a graded record says for itself
+            # whether it had alt text, without consulting the state file.
+            record["middleware"] = round_rec.get("middleware")
             record["input_tokens"] = round_rec.get("input_tokens")
             record["output_tokens"] = round_rec.get("output_tokens")
             record["total_tokens"] = round_rec.get("total_tokens")
@@ -262,6 +334,15 @@ class Benchmark:
         async with semaphore:
             try:
                 grader_text = await extract_grid(client, output_bytes, self.grader_model)
+            except FatalAPIError as e:
+                # Not this image's problem: the grader model is unusable, so
+                # every remaining puzzle and model would fail the same way,
+                # and each one still costs a harness run to produce.
+                raise FatalRunError(
+                    f"grader model {self.grader_model!r} is unusable "
+                    f"(HTTP {e.status}). Nothing further can be graded — fix "
+                    f"--grader-model and re-run. ({e})"
+                ) from e
             except Exception as e:
                 grader_error = f"grader call failed: {type(e).__name__}: {e}"
 
@@ -357,14 +438,31 @@ class Benchmark:
                     print(f"  [{model}] puzzle {pid}: {mark}")
 
         results.sort(key=lambda r: r["puzzle_id"])
+
+        # The session's wall clock is charged what its rounds were, so the
+        # total keeps agreeing with the sum of the rounds it covers.
+        charged = sum(r.get("transcription_elapsed") or 0 for r in results)
+        if summary and charged:
+            summary["harness_total_elapsed"] = summary.get("total_elapsed")
+            summary["transcription_elapsed"] = round(charged, 3)
+            if summary.get("total_elapsed") is not None:
+                summary["total_elapsed"] = round(
+                    summary["total_elapsed"] + charged, 3
+                )
+
         return results, summary
 
     async def _transcribe_puzzle(self, puzzle, img_dir, semaphore):
         """Run the vision middleware for one puzzle image.
 
-        Returns (puzzle_id, transcription_text) or (puzzle_id, None) on
-        failure. Nothing is written to disk: the text goes into the task spec
-        as the image's alt text, which is the only channel the harness reads.
+        Returns (puzzle_id, transcription_text, fatal_message, seconds).
+        The text is None when this puzzle failed; `fatal_message` is set only
+        for a failure the next puzzle would repeat — a model ID the endpoint
+        does not serve, a rejected key — which stops the run rather than
+        quietly transcribing nothing. `seconds` is how long the middleware
+        took, timed from inside the semaphore so a queued puzzle is not
+        charged for waiting its turn: what a model would pay for this
+        transcription is the call, not the benchmark's own batching.
         """
         pid = puzzle["id"]
         image_path = img_dir / f"puzzle_{pid:03d}.png"
@@ -384,6 +482,7 @@ class Benchmark:
             if self.vision_middleware_config:
                 argv += ["--config", str(self.vision_middleware_config)]
 
+            started = time.perf_counter()
             try:
                 proc = await asyncio.create_subprocess_exec(
                     *argv,
@@ -391,14 +490,28 @@ class Benchmark:
                     stderr=asyncio.subprocess.PIPE,
                 )
                 stdout, stderr = await proc.communicate()
+                elapsed = time.perf_counter() - started
                 if proc.returncode != 0:
+                    detail = stderr.decode(errors="replace").strip()[:300]
                     print(
                         f"  [vision-middleware] puzzle {pid}: FAILED "
-                        f"(exit {proc.returncode}): "
-                        f"{stderr.decode(errors='replace')[:200]}",
+                        f"(exit {proc.returncode}) after {elapsed:.1f}s: {detail}",
                         flush=True,
                     )
-                    return pid, None
+                    # The middleware reports a configuration failure — a model
+                    # the endpoint does not serve, a rejected key — with its
+                    # own exit code, because the next puzzle would fail the
+                    # same way and so would every model still queued.
+                    if proc.returncode == MIDDLEWARE_EXIT_CONFIG_ERROR:
+                        # Just the failure, not the progress chatter that
+                        # precedes it on the same stream.
+                        reason = next(
+                            (ln for ln in reversed(detail.splitlines())
+                             if ln.startswith("error:")),
+                            detail.splitlines()[-1] if detail else "",
+                        )
+                        return pid, None, reason or "configuration error", elapsed
+                    return pid, None, None, elapsed
                 text = stdout.decode(errors="replace").strip()
                 if not text:
                     # Exit 0 with nothing on stdout is a failure, not a
@@ -406,60 +519,200 @@ class Benchmark:
                     # the prompt under text telling the model to rely on it.
                     print(
                         f"  [vision-middleware] puzzle {pid}: FAILED "
-                        f"(exit 0 but no output)",
+                        f"(exit 0 but no output after {elapsed:.1f}s)",
                         flush=True,
                     )
-                    return pid, None
+                    return pid, None, None, elapsed
                 print(
                     f"  [vision-middleware] puzzle {pid}: OK "
-                    f"({len(text)} chars)",
+                    f"({len(text)} chars in {elapsed:.1f}s)",
                     flush=True,
                 )
-                return pid, text
+                return pid, text, None, elapsed
             except Exception as e:
+                elapsed = time.perf_counter() - started
                 print(
                     f"  [vision-middleware] puzzle {pid}: ERROR "
-                    f"{type(e).__name__}: {e}",
+                    f"{type(e).__name__} after {elapsed:.1f}s: {e}",
                     flush=True,
                 )
-                return pid, None
+                return pid, None, None, elapsed
 
     async def _run_vision_middleware(self, puzzles, img_dir):
         """Transcribe every puzzle image through the vision middleware.
 
-        Returns (transcriptions, n_ok): a dict mapping puzzle id → alt text for
-        EVERY puzzle, and how many of those are real transcriptions. A puzzle
+        Returns (transcriptions, n_ok, seconds): a dict mapping puzzle id →
+        alt text for EVERY puzzle, how many of those are real transcriptions,
+        and a dict mapping puzzle id → the seconds that puzzle's transcription
+        took, which every model's round for it is later charged. A puzzle
         the middleware failed on still gets an entry, carrying
         ``TRANSCRIPTION_UNAVAILABLE`` — the prompts are shared across rounds,
         so the alt attribute is always rendered and a missing entry would show
         the model an empty one.
+
+        Raises FatalRunError when the middleware is misconfigured, or when it
+        transcribed nothing at all. Both mean every model in the run would be
+        prompted exactly as if `--vision-middleware` had not been passed,
+        which is not the experiment that was asked for and costs a full run to
+        discover afterwards.
         """
         semaphore = asyncio.Semaphore(self.concurrency)
         tasks = [
             asyncio.create_task(self._transcribe_puzzle(p, img_dir, semaphore))
             for p in puzzles
         ]
-        transcriptions, n_ok = {}, 0
+        transcriptions, n_ok, fatal = {}, 0, None
+        seconds = {}
         for coro in asyncio.as_completed(tasks):
-            pid, text = await coro
+            pid, text, fatal_msg, elapsed = await coro
+            seconds[pid] = elapsed
+            if fatal_msg and fatal is None:
+                fatal = fatal_msg
             if text is None:
                 transcriptions[pid] = TRANSCRIPTION_UNAVAILABLE
             else:
                 transcriptions[pid] = text
                 n_ok += 1
-        return transcriptions, n_ok
+
+        if fatal is not None:
+            raise FatalRunError(
+                f"vision middleware is misconfigured: {fatal.rstrip('.')}. "
+                f"Fix {self.vision_middleware_config or 'vision-middleware/models.toml'} "
+                f"and re-run; nothing was graded."
+            )
+        if not n_ok:
+            raise FatalRunError(
+                f"vision middleware transcribed 0/{len(puzzles)} puzzles. "
+                f"Every model would run the standard prompts, so the run "
+                f"would measure the opposite of what --vision-middleware asks."
+            )
+        return transcriptions, n_ok, seconds
+
+    def _middleware_model(self):
+        """The transcriber the middleware is configured to use, for the record.
+
+        Read from the same config the middleware itself reads: the explicit
+        --vision-middleware-config, else models.toml beside the middleware
+        script. Best-effort — a custom middleware need not use a config at
+        all, and the audit index is still worth writing without this.
+        """
+        candidates = []
+        if self.vision_middleware_config:
+            candidates.append(Path(self.vision_middleware_config))
+        script = next(
+            (a for a in reversed(self.vision_middleware_cmd) if a.endswith(".py")),
+            None,
+        )
+        if script:
+            candidates.append(Path(script).resolve().parent / "models.toml")
+        for path in candidates:
+            try:
+                return tomllib.loads(path.read_text())["vision"]["model"]
+            except (OSError, KeyError, tomllib.TOMLDecodeError):
+                continue
+        return None
+
+    def _save_transcriptions(self, transcriptions, img_dir):
+        """Write the middleware's output to the results dir, for auditing.
+
+        The transcriptions otherwise live only inside the prompts in
+        task.json, so nothing afterwards can check what the middleware
+        actually said about each puzzle — and a middleware run's timings and
+        accuracy only mean something next to that text. Each puzzle's
+        transcription gets its own file, beside an index naming the
+        transcriber and recording, per puzzle, whether it produced anything
+        and the seconds every model's round for it was charged.
+
+        Best-effort: an audit copy that cannot be written must not stop a run
+        whose prompts already carry the text.
+        """
+        out_dir = self.output_dir / "transcriptions"
+        entries = []
+        try:
+            out_dir.mkdir(parents=True, exist_ok=True)
+            for pid in sorted(transcriptions):
+                text = transcriptions[pid]
+                ok = text != TRANSCRIPTION_UNAVAILABLE
+                name = None
+                if ok:
+                    name = f"puzzle_{pid:03d}.txt"
+                    (out_dir / name).write_text(text)
+                entries.append({
+                    "puzzle_id": pid,
+                    "image": f"puzzle_{pid:03d}.png",
+                    "file": name,
+                    "ok": ok,
+                    "chars": len(text) if ok else 0,
+                    # The figure added to this puzzle's round for every model
+                    # (see `_transcription_charge`), whether it succeeded or
+                    # not: the run waited for it either way.
+                    "elapsed_s": round(self.transcription_seconds.get(pid) or 0.0, 3),
+                })
+            charged = [e["elapsed_s"] for e in entries if e["elapsed_s"]]
+            (out_dir / "index.json").write_text(json.dumps({
+                "model": self._middleware_model(),
+                "command": self.vision_middleware_cmd,
+                "config": (
+                    str(self.vision_middleware_config)
+                    if self.vision_middleware_config else None
+                ),
+                "images_dir": str(img_dir),
+                "n_puzzles": len(entries),
+                "n_ok": sum(1 for e in entries if e["ok"]),
+                "total_elapsed_s": round(sum(charged), 3),
+                "avg_elapsed_s": round(sum(charged) / len(charged), 3) if charged else None,
+                "puzzles": entries,
+            }, indent=2) + "\n")
+        except OSError as e:
+            print(f"  [vision-middleware] could not save transcriptions "
+                  f"for auditing: {e}")
+            return None
+        return out_dir
+
+    @staticmethod
+    def _blanket_failure(results):
+        """The one error every round of this model died of, or None.
+
+        A model that fails every single round with the *identical* message is
+        rarely a model problem: a broken harness dependency, an exhausted key,
+        a bad endpoint. The signature is the error text with the round-specific
+        tail cut off, so two rounds that failed the same way match.
+        """
+        if not results:
+            return None
+        errors = set()
+        for r in results:
+            if r.get("verdict", {}).get("correct") or r.get("output_image"):
+                return None
+            error = r.get("error")
+            if not error:
+                return None
+            errors.add(error[:120])
+        return errors.pop() if len(errors) == 1 else None
 
     def summarize(self, model, results, session_summary=None):
         """Per-model metrics. The implementation lives in get_leaderboard.py so that
         summarize_results.py can rebuild the identical numbers from disk."""
         return _summarize(model, results, session_summary)
 
-    def _record_trial(self, summaries, puzzles_meta):
-        """Merge this run's summaries into the permanent trial for this puzzle set.
+    def _record_trial(self, summaries, puzzles_meta, *, standings=True):
+        """Merge summaries into the permanent trial for this puzzle set.
+
+        Called once per model, as soon as that model has finished all its
+        rounds, rather than once at the end of the run. A benchmarking session
+        is long and routinely gets stopped partway; recording as we go means
+        every model that actually completed is in the record, and a harness
+        change can be compared against it while the rest of the run is still
+        going. Each entry is stamped with the commit it came from, so the
+        record says which code produced it.
 
         Only complete, uninterrupted runs are eligible: a session that stopped
         after two of five puzzles could otherwise post a 100% accuracy that
         outranks an honest full run.
+
+        With `standings=False` the outcome is reported as one line per model
+        instead of the full best-so-far table, which would otherwise be
+        reprinted after every model.
         """
         if self.trials_dir is None:
             return
@@ -493,7 +746,7 @@ class Benchmark:
                 n_puzzles=self.n_puzzles,
                 difficulty=self.difficulty,
                 fingerprint=fingerprint,
-                middleware=self.vision_middleware,
+                middleware=self.vision_middleware_applied,
             )
         except ValueError as e:
             print(f"\nNot recording a trial: {e}")
@@ -501,24 +754,57 @@ class Benchmark:
 
         save_trial(path, trial)
 
-        print(f"\n=== Trial {tid} ({path}) ===")
+        by_key = {_entry_key(e): e for e in trial["entries"]}
+        if standings:
+            print(f"\n=== Trial {tid} ({path}) ===")
         for key, what in changes.items():
             model, mw = key if isinstance(key, tuple) else (key, False)
             mw_tag = " [mw]" if mw else ""
-            print(f"  {what:<9} {model}{mw_tag}")
+            if standings:
+                print(f"  {what:<9} {model}{mw_tag}")
+            else:
+                rev = (by_key.get(key) or {}).get("rev")
+                print(
+                    f"  Trial {tid}: {what} — {model}{mw_tag}"
+                    + (f"  [rev {rev}]" if rev else "")
+                )
         for model, why in excluded:
-            print(f"  {'skipped':<9} {model} ({why})")
+            if standings:
+                print(f"  {'skipped':<9} {model} ({why})")
+            else:
+                print(f"  Trial {tid}: not recorded — {model} ({why})")
+        if standings:
+            self._print_trial_standings(trial)
+        return trial
+
+    def _print_trial_standings(self, trial=None):
+        """Print the trial's best-so-far table.
+
+        Read-only by default: the entries were merged model by model as the
+        run went, so re-merging here would count every model as a second
+        attempt and inflate its `runs`.
+        """
+        if self.trials_dir is None or self.seed is None:
+            return
+        tid = trial_id(self.seed, self.n_puzzles, self.difficulty)
+        path = self.trials_dir / f"{tid}.json"
+        if trial is None:
+            trial = load_trial(path)
+            if not trial:
+                return
+            print(f"\n=== Trial {tid} ({path}) ===")
         print("  best-so-far standings:")
-        for i, e in enumerate(trial["entries"], 1):
+        for i, e in enumerate(trial.get("entries") or [], 1):
             imgs = e.get("n_output_images")
             img_col = (
                 f"  imgs={imgs}/{e.get('n_puzzles', '?')}" if imgs is not None else ""
             )
             mw = "yes" if e.get("middleware") else " --"
+            rev = e.get("rev") or "?"
             print(
                 f"    {i}. {e['model']}: acc={e['accuracy'] * 100:5.1f}%  "
                 f"avg={e['avg_elapsed_s']:6.2f}s  tokens={e.get('total_tokens', 0):>9,}"
-                f"  mw={mw}{img_col}  (runs={e.get('runs', 1)})"
+                f"  mw={mw}{img_col}  (runs={e.get('runs', 1)}, rev={rev})"
             )
 
     def _model_run_order(self, models):
@@ -554,7 +840,10 @@ class Benchmark:
                 return (0, missing, cat_order, 0, expensive, model)
 
             failed = 0
-            results_path = self.output_dir / f"{safe}.json"
+            results_path = self.output_dir / FINAL_SUBDIR / f"{safe}.json"
+            if not results_path.exists():
+                # Runs made before the records moved into final/.
+                results_path = self.output_dir / f"{safe}.json"
             if results_path.exists():
                 try:
                     records = json.loads(results_path.read_text())
@@ -584,6 +873,11 @@ class Benchmark:
         puzzles_meta = [
             {
                 "id": p["id"],
+                # The seed that generated this set. Carried per puzzle so the
+                # file stays a plain list — every reader here indexes it as
+                # one — while still saying which run it belongs to. None when
+                # the run was unseeded, and therefore not reproducible.
+                "seed": self.seed,
                 "difficulty": p["difficulty"],
                 "puzzle": p["puzzle"],
                 "solution": p["solution"],
@@ -609,20 +903,26 @@ class Benchmark:
                 f"\nRunning vision middleware "
                 f"({self.vision_middleware_cmd[0]}) on {len(puzzles)} puzzles..."
             )
-            transcriptions, n_ok = asyncio.run(
+            transcriptions, n_ok, self.transcription_seconds = asyncio.run(
                 self._run_vision_middleware(puzzles, img_dir)
             )
+            charged = [s for s in self.transcription_seconds.values() if s]
             print(
                 f"Vision middleware: {n_ok}/{len(puzzles)} puzzles transcribed"
-            )
-            if not n_ok:
-                # Every puzzle failed. Run the ordinary prompts rather than
-                # ones that promise alt text and carry only the failure notice.
-                print(
-                    "Vision middleware produced nothing — falling back to the "
-                    "standard prompts for this run."
+                + (
+                    f", {sum(charged):.1f}s of transcription "
+                    f"({sum(charged) / len(charged):.1f}s per puzzle, added to "
+                    f"every model's round for that puzzle so the times stay "
+                    f"comparable with a run without the middleware)"
+                    if charged else ""
                 )
-                transcriptions = None
+            )
+            # A total failure raises rather than falling back: see
+            # `_run_vision_middleware`.
+            self.vision_middleware_applied = True
+            saved = self._save_transcriptions(transcriptions, img_dir)
+            if saved is not None:
+                print(f"Transcriptions saved for auditing: {saved}")
 
         task_spec = write_task_spec(
             self.output_dir / "task.json",
@@ -656,6 +956,11 @@ class Benchmark:
             print(f"Local grader: could not calibrate ({e}) — API fallback disabled.")
 
         summaries = []
+        # (error signature, models it has hit in a row). Two different models
+        # failing every round the same way is a broken run, not two broken
+        # models; carrying on spends a harness session per model to rediscover
+        # it. See `_blanket_failure`.
+        blanket = (None, [])
 
         # Sort models so the ones that need the most work run first: interrupted
         # models with missing outputs first, then never-run models, then complete
@@ -698,13 +1003,32 @@ class Benchmark:
             )
 
             safe = model.replace("/", "_").replace(":", "_")
-            (self.output_dir / f"{safe}.json").write_text(
+            final_dir = self.output_dir / FINAL_SUBDIR
+            final_dir.mkdir(parents=True, exist_ok=True)
+            (final_dir / f"{safe}.json").write_text(
                 json.dumps(results, indent=2)
             )
 
+            signature = self._blanket_failure(results)
+            if signature is not None and signature == blanket[0]:
+                blanket[1].append(model)
+                if len(blanket[1]) >= 2:
+                    raise FatalRunError(
+                        f"{len(blanket[1])} models in a row failed every round "
+                        f"with the same error, so the cause is the run, not the "
+                        f"models: {', '.join(blanket[1])} — {signature.strip()}. "
+                        f"Nothing further would be measured; the models already "
+                        f"finished are recorded."
+                    )
+            else:
+                blanket = (signature, [model] if signature else [])
+
             summary = self.summarize(model, results, session_summary)
-            summary["middleware"] = self.vision_middleware
+            summary["middleware"] = self.vision_middleware_applied
             summaries.append(summary)
+            # Into the permanent record now, not at the end of the run: this
+            # model is finished, and a session stopped later must not lose it.
+            self._record_trial([summary], puzzles_meta, standings=False)
             print(f"\nSummary for {model}:")
             print(
                 f"  Correct: {summary['n_correct']}/{summary['n_puzzles']} "
@@ -743,4 +1067,6 @@ class Benchmark:
                 f"tokens={s['total_tokens']:>9,}{suffix}"
             )
 
-        self._record_trial(summaries, puzzles_meta)
+        # Every model was recorded as it finished; this only reads the record
+        # back, so nothing is counted as a second attempt.
+        self._print_trial_standings()

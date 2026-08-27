@@ -15,6 +15,12 @@ Usage:
     uv run cli/summarize_results.py --format markdown        # pasteable table
     uv run cli/summarize_results.py --write-leaderboard      # (re)write leaderboard.json
     uv run cli/summarize_results.py --results-dir other/     # another directory
+    uv run cli/summarize_results.py --no-trials              # only what is on disk
+
+Rows come from `trials/`, the permanent record of the best result for this
+puzzle set — `results/` is scratch that every run overwrites. Where the
+results dir beats the record, its numbers are shown instead and marked `*`:
+a new best. The report's first line says which files were read.
 """
 import argparse
 import json
@@ -31,6 +37,7 @@ from benchmarker.get_leaderboard import (  # noqa: E402
     format_text,
     leaderboard,
 )
+from benchmarker.trials import DEFAULT_TRIALS_DIR  # noqa: E402
 
 DEFAULT_RESULTS_DIR = "results"
 DEFAULT_MODELS_FILE = "models.toml"
@@ -55,6 +62,19 @@ def main(argv=None):
         help="If set, only the solutions-<id> directory for this harness is "
              "summarized. By default every solutions-* directory under "
              "--results-dir is reported in turn.",
+    )
+    parser.add_argument(
+        "--trials-dir",
+        default=DEFAULT_TRIALS_DIR,
+        help="Directory of permanent trial files. Each model's recorded best "
+             "for this exact puzzle set supplies its row, unless the results "
+             f"dir beats it (default: {DEFAULT_TRIALS_DIR})",
+    )
+    parser.add_argument(
+        "--no-trials",
+        action="store_true",
+        help="Report strictly what is in the results dir, ignoring the "
+             "recorded trial for these puzzles.",
     )
     parser.add_argument(
         "--no-verify-images",
@@ -100,6 +120,7 @@ def main(argv=None):
     if not solutions_dirs:
         sys.exit(f"no solutions-* or solutions/ directory found in {results_dir}")
 
+    reported = 0
     for sd in solutions_dirs:
         hid = sd.name.removeprefix("solutions-")
         try:
@@ -108,6 +129,7 @@ def main(argv=None):
                 models_file=args.models_file,
                 verify_images=not args.no_verify_images,
                 solutions_dir=sd,
+                trials_dir=None if args.no_trials else args.trials_dir,
             )
         except FileNotFoundError as e:
             print(f"skipping {sd.name}: {e}", file=sys.stderr)
@@ -124,15 +146,10 @@ def main(argv=None):
         else:
             text = format_text(report, hide_errors=args.hide_errors)
 
-        # Prefix every report with a harness heading when there is more than
-        # one solutions dir.
-        if len(solutions_dirs) > 1 and args.format == "text":
-            divider = f"{'=' * 20}  {sd.name} (harness: {hid})  {'=' * 20}"
-            out_lines = [divider, text]
-        else:
-            out_lines = [text]
-
-        combined = "\n".join(out_lines)
+        # Every report opens by naming its own solutions dir, so consecutive
+        # harnesses need a blank line between them, not a heading.
+        combined = ("\n" if reported and not args.out else "") + text
+        reported += 1
 
         if args.out:
             base = Path(args.out)

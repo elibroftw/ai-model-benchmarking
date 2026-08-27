@@ -191,6 +191,49 @@ def _is_no_image_support_error(exc) -> bool:
     )
 
 
+# How many times a round is re-attempted after a transient provider failure,
+# and the base delay between attempts (grows with each retry).
+TRANSIENT_RETRIES = 2
+TRANSIENT_RETRY_DELAY = 5
+
+# NOTE: do not pass `num_retries` to LiteLLMModel. litellm implements retries
+# with tenacity, which is not a dependency here, so it fails the generation
+# outright with "tenacity import failed" — every round of every model dies in
+# milliseconds. The round-level retry above covers the same failures without
+# needing it.
+
+
+def _is_transient_provider_error(exc) -> bool:
+    """True if a generation failed for a reason that may not recur.
+
+    OpenRouter reports an upstream provider dropping out by injecting an error
+    object into the SSE stream, which litellm surfaces as a
+    `MidStreamFallbackError` wrapping "provider_unavailable" — nothing about
+    the request is wrong, and the same prompt often succeeds moments later on
+    another provider serving the same weights. Matched on the substance, so
+    the wording of any one layer can change without silently disabling the
+    retry.
+
+    Deliberately narrow: a model that is genuinely unusable, a bad key, or a
+    refusal must fail the round rather than be re-attempted for nothing.
+    """
+    msg = str(exc).lower()
+    transient = (
+        "provider_unavailable",
+        "midstreamfallbackerror",
+        "error injected into sse stream",
+        "service unavailable",
+        "temporarily unavailable",
+        "overloaded",
+        "internal server error",
+        "bad gateway",
+        "gateway timeout",
+        "connection error",
+        "timeout error",
+    )
+    return any(t in msg for t in transient)
+
+
 def _preload_imaging(agent) -> None:
     """Pre-bind PIL into the agent's interpreter.
 
@@ -433,6 +476,36 @@ def _save_state(output_dir: Path, model_id: str, fingerprint: str, rounds: list,
         print(f"[harness] failed to save state: {e!r}", file=sys.stderr)
 
 
+TRANSCRIPTIONS_SUBDIR = "transcriptions"
+
+
+def _save_transcription(output_dir: Path, input_name: str, text: str):
+    """Save the description this round's input came with, beside the outputs.
+
+    The task spec's transcriptions arrive from whatever produced them — for
+    this benchmark, a vision middleware — and are otherwise visible only
+    inside the prompt of a session that has since ended. A run's timings and
+    scores cannot be audited without them: whether the middleware helped, and
+    whether it described the input correctly, is a question about this exact
+    text. Written per round because a resumed session can mix rounds that got
+    one with rounds that did not.
+
+    Returns the path relative to `output_dir`, or None if it could not be
+    written. Best-effort: never raises, since losing an audit copy must not
+    fail the round that produced it.
+    """
+    try:
+        dest_dir = output_dir / TRANSCRIPTIONS_SUBDIR
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        dest = dest_dir / f"{Path(input_name).stem}.txt"
+        dest.write_text(text)
+        return str(dest.relative_to(output_dir))
+    except Exception as e:  # noqa: BLE001 - the audit copy is best-effort
+        print(f"[harness] failed to save transcription for {input_name}: {e!r}",
+              file=sys.stderr)
+        return None
+
+
 def _token_counts(agent) -> tuple[int, int]:
     """Session-cumulative (input, output) token counts from the agent's monitor.
 
@@ -560,7 +633,9 @@ def run(
     Returns:
         dict with `success` (bool), `rounds` (list of per-round records),
         `n_solved` (int), `total_elapsed` (float), `error` (str, optional).
-        Each round is also emitted as one JSONL line on stdout as it completes.
+        Each round record carries `middleware`: whether the task spec supplied
+        a transcription for that round's input. Each round is also emitted as
+        one JSONL line on stdout as it completes, and saved to the state file.
     """
     from rich.console import Console
     from smolagents import AgentLogger, CodeAgent, LiteLLMModel, LogLevel
@@ -722,6 +797,14 @@ def run(
                 # A description of this round's input, if the task spec
                 # carries one, for prompts that use {transcription}.
                 transcription_text = spec["transcriptions"].get(input_path.name)
+                # Kept on disk as well as in the prompt: see
+                # `_save_transcription`.
+                transcription_file = (
+                    _save_transcription(
+                        output_dir, input_path.name, transcription_text
+                    )
+                    if transcription_text is not None else None
+                )
 
                 def _build_prompt(with_images):
                     return build_prompt(
@@ -760,33 +843,59 @@ def run(
                             flush=True,
                         )
 
+                attempt = 0
                 try:
-                    try:
-                        final_answer = agent.run(
-                            prompt,
-                            # Reset only on the first round executed in this
-                            # process; later rounds keep the session going.
-                            reset=first_executed,
-                            **({"images": [img]} if send_images else {}),
-                        )
-                    except Exception as e:
-                        if not (send_images and _is_no_image_support_error(e)):
+                    for attempt in range(TRANSIENT_RETRIES + 1):
+                        try:
+                            final_answer = agent.run(
+                                prompt,
+                                # Reset only on the first round executed in
+                                # this process; later rounds keep the session
+                                # going.
+                                reset=first_executed,
+                                **({"images": [img]} if send_images else {}),
+                            )
+                            break
+                        except Exception as e:
+                            if send_images and _is_no_image_support_error(e):
+                                # Text-only model: drop the attachment for the
+                                # rest of the session and retry this round with
+                                # the task's text-only prompt, which tells the
+                                # agent to read the input file itself.
+                                send_images = False
+                                print(
+                                    f"[harness] model cannot accept images; "
+                                    f"switching to text-only mode (agent must "
+                                    f"read {input_name} itself)",
+                                    file=sys.stderr,
+                                    flush=True,
+                                )
+                                deadline.reset()
+                                final_answer = agent.run(
+                                    _build_prompt(False), reset=first_executed
+                                )
+                                break
+                            # A provider dropping out mid-generation is not the
+                            # model failing the task; re-attempting the round
+                            # costs tokens but is the difference between a data
+                            # point and a hole in the run.
+                            if (attempt < TRANSIENT_RETRIES
+                                    and _is_transient_provider_error(e)):
+                                delay = TRANSIENT_RETRY_DELAY * (attempt + 1)
+                                print(
+                                    f"[harness] transient provider failure on "
+                                    f"{input_path.name} "
+                                    f"(attempt {attempt + 1}/"
+                                    f"{TRANSIENT_RETRIES + 1}): "
+                                    f"{type(e).__name__}: {e}\n"
+                                    f"[harness] retrying this round in {delay}s",
+                                    file=sys.stderr,
+                                    flush=True,
+                                )
+                                time.sleep(delay)
+                                deadline.reset()
+                                continue
                             raise
-                        # Text-only model: drop the attachment for the rest of
-                        # the session and retry this round with the task's
-                        # text-only prompt, which tells the agent to read the
-                        # input file itself.
-                        send_images = False
-                        print(
-                            f"[harness] model cannot accept images; switching to "
-                            f"text-only mode (agent must read {input_name} itself)",
-                            file=sys.stderr,
-                            flush=True,
-                        )
-                        deadline.reset()
-                        final_answer = agent.run(
-                            _build_prompt(False), reset=first_executed
-                        )
                 except KeyboardInterrupt:
                     # Let everything already finished persist, then stop.
                     interrupted = True
@@ -816,7 +925,26 @@ def run(
                     "item_id": item_id,
                     "item_name": input_path.name,
                     "round": i + 1,
+                    # Whether this round ran with a transcription supplied by
+                    # the caller's vision middleware — i.e. whether the prompt
+                    # carried alt text for the input or the model was left to
+                    # read the image itself. Recorded per round because a
+                    # resumed session can replay rounds run the other way, and
+                    # the two are not comparable. A round record without this
+                    # key predates the field.
+                    "middleware": transcription_text is not None,
+                    # Where the text that round was given is saved, relative
+                    # to the output dir, so the record and the transcription
+                    # it ran on stay together.
+                    "transcription_file": transcription_file,
+                    "transcription_chars": (
+                        len(transcription_text)
+                        if transcription_text is not None else None
+                    ),
                     "success": success,
+                    # >1 when a transient provider failure cost this round an
+                    # extra attempt; its time and tokens are all counted here.
+                    "attempts": attempt + 1,
                     "elapsed": elapsed,
                     "input_tokens": round_in,
                     "output_tokens": round_out,

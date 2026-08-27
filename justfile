@@ -22,10 +22,24 @@ _preliminary *FLAGS:
         -v {{FLAGS}}
 
 # Preliminary run: the small seeded set, straight to the models.
-preliminary: (_preliminary)
+preliminary *FLAGS: (_preliminary)
 
 # Preliminary run through the vision middleware (alt text for every puzzle).
-preliminary-v: (_preliminary "--vision-middleware --fresh")
+preliminary-v *FLAGS: (_preliminary "--vision-middleware --fresh")
+
+# The same set for ONE model, by full id or unique substring: `just one glm-5.3-flash`
+one MODEL *FLAGS: (_preliminary "--model " + MODEL + " " + FLAGS)
+
+# One model through the vision middleware. e.g. `just one-v glm-5.3-flash`
+one-v MODEL *FLAGS: (_preliminary "--model " + MODEL + " --vision-middleware --fresh " + FLAGS)
+
+# test the vision-middleware by running the example file
+v-mw-test *FLAGS:
+    uv run vision-middleware/example.py {{FLAGS}}
+
+# quick benchmark of open-weight vision-models
+v-mw-bench:
+    uv run vision-middleware/compare_vision_models.py
 
 # Rebuild the leaderboard from results/, verifying every solution PNG locally.
 summarize *FLAGS:

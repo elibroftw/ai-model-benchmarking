@@ -12,9 +12,10 @@ Three sources are read, and they mean different things:
   rules. This is the strongest signal available here: deterministic, free, and
   independent of both the grading API and the agent's own account of its work.
   The transcriber is checked against puzzles.json before it is trusted.
-* `<model>.json` — the benchmarker's graded records, from the grading API.
-  `verdict.correct` is a real verification too, but only exists when that call
-  succeeded.
+* `final/<model>.json` — the benchmarker's graded records, from the grading
+  API. `verdict.correct` is a real verification too, but only exists when that
+  call succeeded. (Runs made before the records moved into `final/` left them
+  at the top level; both are read.)
 * `solutions/<model>/.harness_state.json` — the harness's own resume file. Its
   `success: true` means only "the agent finished without raising and wrote
   output.png"; the `final_answer` beside it is the agent's own claim about its
@@ -37,10 +38,19 @@ import tomllib
 from pathlib import Path
 
 from .trials import _rank_key
+from .trials import (
+    DEFAULT_TRIALS_DIR,
+    is_better,
+    load_trial,
+    puzzle_fingerprint as trial_puzzle_fingerprint,
+)
 from .vision import Reader, grade_image, self_check
 
-# Files in the results dir that are not per-model records.
+# Files in the results dir that are not per-model records. Only needed for
+# the pre-`final/` layout, where model records sat beside the run's shared
+# artifacts. Kept in sync with FINAL_SUBDIR in benchmark.py.
 NON_MODEL_FILES = {"puzzles.json", "leaderboard.json", "task.json"}
+FINAL_SUBDIR = "final"
 
 # Written by the harness into each model's solutions dir. Kept in sync with
 # STATE_FILENAME in sudoku_agent_harness/agent.py.
@@ -352,6 +362,7 @@ def records_from_state(state, model_dir, difficulty_by_id=None):
             "output_tokens": rec.get("output_tokens"),
             "total_tokens": rec.get("total_tokens"),
             "harness_final_answer": rec.get("final_answer"),
+            "middleware": rec.get("middleware"),
         }
         if rec.get("error"):
             record["error"] = f"harness failure: {rec['error']}"
@@ -380,7 +391,8 @@ def _error_breakdown(records):
     return errors
 
 
-def collect(results_dir, models_file=None, verify_images=True, solutions_dir=None):
+def collect(results_dir, models_file=None, verify_images=True, solutions_dir=None,
+            trials_dir=DEFAULT_TRIALS_DIR):
     """Read a results dir into a report dict. Nothing here calls the network.
 
     With `verify_images`, every solution PNG on disk is transcribed locally and
@@ -390,6 +402,12 @@ def collect(results_dir, models_file=None, verify_images=True, solutions_dir=Non
     ``solutions_dir`` overrides the default ``<results_dir>/solutions``, and
     is how the caller iterates over multiple harnesses (``solutions-dsh``,
     ``solutions-smolagents``, …).
+
+    ``trials_dir`` is read first and supplies each model's row: it is the
+    permanent record of the best result for this puzzle set, while `results/`
+    is scratch that any later run overwrites. A results dir that BEATS the
+    record keeps its own numbers and is marked, that being a new best rather
+    than a stale row. Pass None to report strictly what is on disk.
     """
     results_dir = Path(results_dir)
     if not results_dir.is_dir():
@@ -402,13 +420,17 @@ def collect(results_dir, models_file=None, verify_images=True, solutions_dir=Non
         solutions_dir = Path(solutions_dir)
     fingerprint = puzzle_image_fingerprint(results_dir / "puzzle_images")
 
-    # Detect whether vision middleware was active: puzzle_NNN.txt files next
-    # to the rendered input images mean the middleware transcribed them.
-    was_middleware = False
+    # Last-resort fallback for rows whose own records and state say nothing
+    # (`_row_middleware` is what normally decides): the pre-`middleware`-field
+    # layout, where a transcribed run left puzzle_NNN.txt beside the rendered
+    # inputs. Deliberately NOT inferred from this run's transcriptions/ dir:
+    # `results/` is scratch shared by every run, so a middleware run's
+    # artifacts say nothing about a row whose records predate it.
     puzzle_images_dir = results_dir / "puzzle_images"
-    if puzzle_images_dir.is_dir():
-        txt_files = list(puzzle_images_dir.glob("puzzle_*.txt"))
-        was_middleware = len(txt_files) > 0
+    was_middleware = (
+        puzzle_images_dir.is_dir()
+        and any(puzzle_images_dir.glob("puzzle_*.txt"))
+    )
 
     puzzles = []
     puzzles_path = results_dir / "puzzles.json"
@@ -442,9 +464,7 @@ def collect(results_dir, models_file=None, verify_images=True, solutions_dir=Non
 
     summaries = []
     unreadable = []
-    for path in sorted(results_dir.glob("*.json")):
-        if path.name in NON_MODEL_FILES:
-            continue
+    for path in model_record_paths(results_dir):
         try:
             records = json.loads(path.read_text())
         except (json.JSONDecodeError, OSError) as e:
@@ -453,12 +473,14 @@ def collect(results_dir, models_file=None, verify_images=True, solutions_dir=Non
         if not isinstance(records, list):
             unreadable.append((path.name, "not a list of records"))
             continue
-        summaries.append(
-            _model_summary(
-                path.stem, records, states.get(path.stem), solutions_dir,
-                fingerprint, graded=True, reader=reader, puzzle_by_id=puzzle_by_id,
-            )
+        summary = _model_summary(
+            path.stem, records, states.get(path.stem), solutions_dir,
+            fingerprint, graded=True, reader=reader, puzzle_by_id=puzzle_by_id,
         )
+        # Which file this row was read from, so the report can say whether the
+        # run predates the move into final/.
+        summary["record_path"] = str(path)
+        summaries.append(summary)
 
     # A run that dies mid-model leaves a state file and no JSON. Those rounds
     # are real work and belong in the report — clearly marked ungraded, since
@@ -478,17 +500,6 @@ def collect(results_dir, models_file=None, verify_images=True, solutions_dir=Non
             )
         )
 
-    # Ranked on whatever verification actually happened, best source first;
-    # a row nothing verified has no score to rank on and sinks to the bottom.
-    for s in summaries:
-        s["verified_accuracy"], s["verification_source"] = _verified_accuracy(s)
-    summaries.sort(
-        key=lambda s: (
-            s["verification_source"] == "none",
-            _rank_key({**s, "accuracy": s["verified_accuracy"]}),
-        )
-    )
-
     # Left over: a solutions dir with neither records nor a readable state file.
     accounted = {s["safe_name"] for s in summaries}
     orphans = []
@@ -503,8 +514,9 @@ def collect(results_dir, models_file=None, verify_images=True, solutions_dir=Non
                     }
                 )
 
-    # Fill in real model IDs last: a state file stores the ID verbatim, so it
-    # beats un-mangling the filename via the manifest.
+    # Real model IDs before anything keyed by them: a state file stores the ID
+    # verbatim, so it beats un-mangling the filename via the manifest. The
+    # trial lookup below needs both the ID and the middleware flag.
     model_types = load_model_types(models_file) if models_file else {}
     model_costs = load_costs(models_file) if models_file else {}
     for s in summaries:
@@ -516,19 +528,62 @@ def collect(results_dir, models_file=None, verify_images=True, solutions_dir=Non
         s["cost_per_1M_output"] = out_price
         s.setdefault("middleware", was_middleware)
 
+    # The trial is the source a row shows by default: `results/` is scratch
+    # that every run overwrites, `trials/` is the permanent best-so-far for
+    # this exact puzzle set. Keyed by (model, middleware), because a
+    # middleware run and a plain run used different prompts and are separate
+    # observations. A results dir that BEATS the record keeps its own numbers
+    # and is marked — that is a new best, not a stale row.
+    trial_entries, trial_meta = load_trial_entries(trials_dir, puzzles)
+    for s in summaries:
+        s["verified_accuracy"], s["verification_source"] = _verified_accuracy(s)
+        found = trial_entries.get(s["model"])
+        if found is None:
+            continue
+        if _disk_beats_trial(s, found):
+            _note_beaten_trial(s, found)
+        else:
+            _apply_trial(s, found, same_run=_same_run_as_trial(s, found))
+
+    # Ranked on whatever verification actually happened, best source first;
+    # a row nothing verified has no score to rank on and sinks to the bottom.
+    # `_rank_key` puts accuracy ahead of time unconditionally, so a faster row
+    # never heads the table over a more accurate one.
+    for s in summaries:
+        s["verified_accuracy"], s["verification_source"] = _verified_accuracy(s)
+    summaries.sort(key=_report_rank_key)
+
     # Drop models the manifest marks as disabled — they are noise.
     disabled_ids = load_disabled_ids(models_file) if models_file else set()
     if disabled_ids:
         summaries = [s for s in summaries if s["model"] not in disabled_ids]
         orphans = [o for o in orphans if o["model"] not in disabled_ids]
 
-    return {
+    # Counted here, not while merging: the rows just dropped were considered
+    # too, and a tally that includes them describes no table anyone sees.
+    trial_meta["n_from_trial"] = sum(
+        1 for s in summaries if (s.get("trial") or {}).get("used")
+    )
+    trial_meta["n_beaten"] = sum(1 for s in summaries if _beat_trial(s))
+    # Rows whose record IS this run: the numbers agree by construction, and
+    # nothing "beat" anything.
+    trial_meta["n_same_run"] = sum(
+        1 for s in summaries if (s.get("trial") or {}).get("same_run")
+    )
+    # Models the record has never seen: reported from the results dir, and
+    # unmarked, since there is nothing for them to have beaten.
+    trial_meta["n_unrecorded"] = sum(1 for s in summaries if not s.get("trial"))
+
+    report = {
         "results_dir": str(results_dir),
         "solutions_dir": str(solutions_dir),
+        "models_file": str(models_file) if models_file else None,
         "harness_id": solutions_dir.name.removeprefix("solutions-"),
         "n_puzzles": len(puzzles),
         "difficulty_mix": _difficulty_mix(puzzles),
         "puzzle_fingerprint": fingerprint,
+        # Which trial files were consulted, and how many rows they supplied.
+        "trial": trial_meta,
         # The transcriber's report card on the input images, or None when the
         # local pass was skipped or impossible.
         "image_check": image_check,
@@ -537,6 +592,9 @@ def collect(results_dir, models_file=None, verify_images=True, solutions_dir=Non
         "unreadable_files": unreadable,
         "totals": _totals(summaries),
     }
+    # First key, so the JSON form opens with the same provenance line the text
+    # and markdown forms print.
+    return {"source": format_source(report, label=False), **report}
 
 
 def _model_summary(
@@ -568,11 +626,64 @@ def _model_summary(
         if r.get("verdict") and r.get("puzzle_id") is not None
     }
     summary["harness"] = harness_claims(state, fingerprint) if state else {}
+    # The state file may be mid-rewrite by a running benchmark: only let it
+    # speak for these records when it is for this puzzle set and covers at
+    # least as many rounds as the row has.
+    state_rounds = (state or {}).get("rounds") or []
+    state_covers = bool(state) and not summary["harness"].get("stale") and (
+        len(state_rounds) >= len(records)
+    )
+    mw, n_with, n_known = _row_middleware(
+        records, state, state_covers_records=state_covers
+    )
+    if mw is not None:
+        summary["middleware"] = mw
+        # A session that mixed the two is flagged rather than averaged: the
+        # rounds are not comparable, so the reader has to know.
+        summary["middleware_rounds"] = [n_with, n_known]
     summary["local"] = (
         _local_verification(reader, model_solutions, puzzle_by_id or {})
         if reader is not None else {}
     )
     return summary
+
+
+def _row_middleware(records, state, *, state_covers_records=False):
+    """Whether this model's rounds ran with a transcription, per round.
+
+    The flag is a property of a round, not of a results dir: a resumed
+    session can replay rounds that ran the other way, and the two are not
+    comparable. Read from the graded records first (`middleware`, or a
+    `transcription_elapsed` charge, which only a middleware run has) — those
+    are the rounds the row's numbers come from, so they are the only
+    first-hand answer.
+
+    The harness state file is second-hand and used only when the records say
+    nothing, and only when it plausibly describes the same session
+    (`state_covers_records`). It is rewritten by every run, so a run in
+    progress would otherwise label a row whose numbers came from an earlier,
+    differently-configured one.
+
+    Returns (flag, n_with, n_known): `flag` is None when nothing trustworthy
+    says either way, leaving the fallback in `collect` to decide.
+    """
+    sources = [records]
+    if state_covers_records:
+        sources.append((state or {}).get("rounds") or [])
+    for rounds in sources:
+        known = [
+            r for r in rounds
+            if r.get("middleware") is not None
+            or r.get("transcription_elapsed") is not None
+        ]
+        if not known:
+            continue
+        n_with = sum(
+            1 for r in known
+            if r.get("middleware") or r.get("transcription_elapsed") is not None
+        )
+        return bool(n_with), n_with, len(known)
+    return None, 0, 0
 
 
 def _local_verification(reader, model_dir, puzzle_by_id):
@@ -630,6 +741,257 @@ def _local_verification(reader, model_dir, puzzle_by_id):
     }
 
 
+# What a trial entry supplies when it supersedes a row. Everything else on the
+# row (model id, type, prices, what is on disk now) still describes this
+# results dir.
+TRIAL_METRIC_KEYS = (
+    "n_puzzles", "n_correct", "n_errors", "n_output_images", "output_rate",
+    "accuracy", "avg_elapsed_s", "input_tokens", "output_tokens",
+    "total_tokens", "tokens_per_correct", "per_difficulty", "learning",
+    "session",
+)
+
+
+def model_record_paths(results_dir):
+    """Every graded per-model JSON in a results dir, newest layout first.
+
+    Records live in `final/`. Runs made before that wrote them beside the
+    run's shared artifacts at the top level, so those are read too — and a
+    model present in both is taken from `final/`, which is where the current
+    benchmarker writes. Returned sorted by model name, so report order does
+    not depend on which layout a run used.
+    """
+    results_dir = Path(results_dir)
+    by_stem = {}
+    for path in sorted((results_dir / FINAL_SUBDIR).glob("*.json")):
+        by_stem[path.stem] = path
+    for path in sorted(results_dir.glob("*.json")):
+        if path.name in NON_MODEL_FILES:
+            continue
+        by_stem.setdefault(path.stem, path)
+    return [by_stem[k] for k in sorted(by_stem)]
+
+
+def load_trial_entries(trials_dir, puzzles):
+    """Each model's best recorded result for this exact puzzle set, by model.
+
+    `results/` is scratch: a re-run that crashed, or one stopped after two
+    puzzles, overwrites what a complete run left there. `trials/` is the
+    durable side — one file per puzzle set, each model's best result — so a
+    row that is worse on disk than in the trial is stale, not news.
+
+    Matched on the puzzles' content hash, never on the seed alone: a
+    generator change can produce different puzzles for the same seed, and
+    those numbers must never be mixed in. A trial that does not describe
+    exactly these puzzles is ignored.
+
+    One row per model, not one per (model, middleware): the record keeps a
+    middleware run and a plain run as separate observations, but the report
+    ranks models, so each model is represented by whichever of its entries is
+    best on the benchmark's own order — score, then time, then cost. The
+    chosen entry's `middleware` flag rides along, so the `mw` column says
+    which kind of run produced that model's best result. The entries that lost
+    are kept under `others`, so nothing is hidden by the choice.
+
+    Returns (entries, meta), where meta records which files were consulted so
+    the report can say so.
+    """
+    meta = {
+        "dir": str(trials_dir) if trials_dir else None,
+        "files": [],
+        # Rows shown from the record, and rows this results dir beat it on.
+        "n_from_trial": 0,
+        "n_beaten": 0,
+    }
+    if not trials_dir or not puzzles:
+        return {}, meta
+    d = Path(trials_dir)
+    if not d.is_dir():
+        return {}, meta
+    try:
+        want = trial_puzzle_fingerprint(puzzles)
+    except (KeyError, TypeError):
+        # puzzles.json without the grids cannot be fingerprinted; without it
+        # there is no safe way to tell which trial describes these puzzles.
+        return {}, meta
+
+    entries = {}
+    for path in sorted(d.glob("*.json")):
+        trial = load_trial(path)
+        if not isinstance(trial, dict):
+            continue
+        if trial.get("puzzle_fingerprint") != want:
+            continue
+        meta["files"].append(str(path))
+        for entry in trial.get("entries") or []:
+            if not isinstance(entry, dict) or not entry.get("model"):
+                continue
+            key = entry["model"]
+            found = {
+                "entry": entry,
+                "trial_id": trial.get("trial_id", path.stem),
+                "path": str(path),
+                "others": [],
+            }
+            prior = entries.get(key)
+            if prior is None:
+                entries[key] = found
+            elif is_better(entry, prior["entry"]):
+                found["others"] = prior["others"] + [prior["entry"]]
+                entries[key] = found
+            else:
+                prior["others"].append(entry)
+    return entries, meta
+
+
+def _same_run_as_trial(summary, found):
+    """True when the record was written by the run sitting in the results dir.
+
+    Time and tokens are the run's fingerprint: two sessions never agree on
+    `avg_elapsed_s` to the last float digit, and the record stores exactly
+    what these records produced. When they match, the record and the row are
+    one result, so "which is better" is not a question — and the images on
+    disk are the record's own images, which makes the local read the best
+    verification available OF THE RECORD, not a foreign one.
+    """
+    entry = found["entry"]
+    disk_avg = summary.get("avg_elapsed_s")
+    entry_avg = entry.get("avg_elapsed_s")
+    if disk_avg is None or entry_avg is None:
+        return False
+    return (
+        abs(disk_avg - entry_avg) <= 1e-9 * max(abs(disk_avg), abs(entry_avg), 1.0)
+        and summary.get("total_tokens") == entry.get("total_tokens")
+        and summary.get("n_puzzles") == entry.get("n_puzzles")
+    )
+
+
+def _apply_trial(summary, found, *, same_run=False):
+    """Report this model's recorded best instead of what is on disk.
+
+    The trial is the default source: `results/` is scratch that every run
+    overwrites, while the trial is the permanent record of each model's best
+    result on this exact puzzle set, updated as each model finishes. What the
+    swap displaced is kept under `trial.replaced`, so the row still says where
+    its numbers came from.
+
+    The local read and the grader verdicts are normally dropped: both describe
+    the images sitting in the solutions dir right now, which belong to a
+    different run, and pairing them with the record's score would invent a
+    result neither produced. When the record came from THIS run
+    (`same_run`) that reasoning inverts — the images are the record's own — so
+    the local verification is kept and the row is scored on it. This is how a
+    record whose accuracy was limited by a failed grader call gets read
+    correctly without the row pretending to be a new result.
+    """
+    entry = found["entry"]
+    summary["trial"] = {
+        "trial_id": found["trial_id"],
+        "path": found["path"],
+        "recorded_at": entry.get("recorded_at"),
+        "runs": entry.get("runs"),
+        "used": True,
+        "same_run": same_run,
+        "middleware": entry.get("middleware"),
+        # The model's other recorded entries — normally the same model's run
+        # with the middleware the other way round — ranked below this one.
+        "others": [
+            {
+                "middleware": o.get("middleware"),
+                "accuracy": o.get("accuracy"),
+                "avg_elapsed_s": o.get("avg_elapsed_s"),
+                "total_tokens": o.get("total_tokens"),
+                "recorded_at": o.get("recorded_at"),
+            }
+            for o in found.get("others") or []
+        ],
+        "replaced": {
+            "accuracy": summary.get("verified_accuracy"),
+            "verification_source": summary.get("verification_source"),
+            "n_correct": summary.get("n_correct"),
+            "n_puzzles": summary.get("n_puzzles"),
+            "avg_elapsed_s": summary.get("avg_elapsed_s"),
+        },
+    }
+    for key in TRIAL_METRIC_KEYS:
+        if key in entry:
+            summary[key] = entry[key]
+    # The numbers now come from the entry, so `mw` must describe the entry's
+    # run rather than whatever is sitting in the results dir.
+    if entry.get("middleware") is not None:
+        summary["middleware"] = bool(entry["middleware"])
+        summary.pop("middleware_rounds", None)
+    if not same_run:
+        summary["local"] = {}
+        summary["grader_verdicts"] = {}
+        summary["n_verdicts"] = 0
+    summary["source"] = "trial"
+
+
+def _beat_trial(summary):
+    """True when this row is the results dir's own, having beaten the record.
+
+    The row carries the entry it beat but did not take its numbers, which is
+    exactly what the `*` marks.
+    """
+    trial = summary.get("trial") or {}
+    return bool(trial) and not trial.get("used")
+
+
+def _disk_beats_trial(summary, found):
+    """True when this results dir holds a better run than the record does.
+
+    The record is what a row shows by default, so this is the exception worth
+    marking: a result better than anything recorded for that model on this
+    puzzle set — on the benchmark's own ranking, correctness then speed then
+    cost. Normally the two agree, since each model is recorded as it finishes;
+    they diverge while a run is still going, or when a run was made against a
+    trials dir other than this one.
+
+    Compared on the accuracy the RECORD is written in — the run's own grader
+    verdicts (`accuracy`), not `verified_accuracy` from the report's fresh
+    local pass. The two are different measurements, and comparing across them
+    let a results dir displace a better record purely because the report had
+    verified its images more thoroughly than the recording run managed to.
+    A record written by this very run never loses to it either; see
+    `_same_run_as_trial`.
+
+    A row nothing verified never wins: unverified numbers are not a result.
+    """
+    if summary.get("verification_source") == "none":
+        return False
+    if _same_run_as_trial(summary, found):
+        return False
+    disk = {
+        "accuracy": summary.get("accuracy") or 0.0,
+        "avg_elapsed_s": summary.get("avg_elapsed_s"),
+        "total_tokens": summary.get("total_tokens"),
+    }
+    return is_better(disk, found["entry"])
+
+
+def _note_beaten_trial(summary, found):
+    """Record that this run beat the entry, without touching the row's numbers.
+
+    The row keeps what the results dir measured — that is the better result —
+    and carries the record it beat, so the improvement can be read off the
+    report rather than inferred.
+    """
+    entry = found["entry"]
+    summary["trial"] = {
+        "trial_id": found["trial_id"],
+        "path": found["path"],
+        "used": False,
+        "beaten": {
+            "accuracy": entry.get("accuracy"),
+            "avg_elapsed_s": entry.get("avg_elapsed_s"),
+            "total_tokens": entry.get("total_tokens"),
+            "recorded_at": entry.get("recorded_at"),
+            "rev": entry.get("rev"),
+        },
+    }
+
+
 def _verified_accuracy(summary):
     """(accuracy, source) from the strongest verification available.
 
@@ -638,6 +1000,14 @@ def _verified_accuracy(summary):
     failed. The grader's verdicts are used when there was no local pass. A
     harness self-report is never a source of correctness.
     """
+    # A recorded trial that displaced this row was itself graded, on this
+    # exact puzzle set, by a run that finished. Unless that record came from
+    # this very run — then the images on disk are its own, and the local read
+    # below is a stronger check of the same result than the grader verdicts
+    # the record was written from.
+    trial = summary.get("trial") or {}
+    if trial.get("used") and not trial.get("same_run"):
+        return summary["accuracy"], "trial-record"
     local = summary.get("local") or {}
     # A model that produced no image at all is verifiably wrong, not unknown:
     # the puzzle set is known and nothing was answered. So the local pass
@@ -721,29 +1091,90 @@ def _grader_cell(summary):
     return f"{summary['n_correct']}/{summary['n_puzzles']}"
 
 
-def _score_cell(summary):
-    """Grader's verdict when available, otherwise the local verification.
+def _verified_counts(summary):
+    """(correct, total) from the source this row is ranked on, or None.
 
-    A simple ``3/3`` is all a reader needs; ``n/a`` is noise.  When the
-    grader did not return any verdicts we fall back to the local pass,
-    which was already run against every image on disk.
+    Follows `_verified_accuracy` exactly — trial record, then local
+    transcription, then grader — so the score a reader sees is the score the
+    ranking used. They diverged before this existed: a partial grader tally
+    (an image whose grader call failed counts as neither right nor wrong) was
+    displayed as e.g. `2/3` while the local pixel pass had verified 3/3 and
+    ranked the row accordingly, putting an apparent 2/3 above real 3/3 rows.
     """
-    if summary.get("n_verdicts"):
-        return f"{summary['n_correct']}/{summary['n_puzzles']}"
+    trial = summary.get("trial") or {}
+    if trial.get("used") and not trial.get("same_run"):
+        return summary["n_correct"], summary["n_puzzles"]
     local = summary.get("local") or {}
     if local:
-        return f"{local['n_correct']}/{local['n_in_set']}"
-    return "-"
+        return local["n_correct"], local["n_in_set"]
+    if summary.get("n_verdicts"):
+        return summary["n_correct"], summary["n_puzzles"]
+    return None
+
+
+def _score_cell(summary):
+    """Correct-out-of-total from the verification this row is ranked on.
+
+    A simple ``3/3`` is all a reader needs; ``n/a`` is noise. Which source
+    that is comes from `_verified_counts`, so the column and the table's
+    order can never tell different stories.
+
+    `*` marks a row this results dir won outright — a result better than
+    anything recorded for that model on this puzzle set. Rows shown from the
+    record are unmarked, that being the default source.
+    """
+    counts = _verified_counts(summary)
+    if counts is None:
+        return "-"
+    star = "" if (summary.get("trial") or {}).get("used") else (
+        "*" if _beat_trial(summary) else ""
+    )
+    return f"{counts[0]}/{counts[1]}{star}"
 
 
 def _is_perfect(summary):
     """True when every puzzle was answered correctly by the best available source."""
-    if summary.get("n_verdicts"):
-        return summary["n_correct"] == summary["n_puzzles"]
-    local = summary.get("local") or {}
-    if local:
-        return local["n_correct"] == local["n_in_set"] > 0
-    return False
+    counts = _verified_counts(summary)
+    return counts is not None and counts[0] == counts[1] > 0
+
+
+def _total_cost(summary):
+    """Total API spend in dollars, or None when the model has no pricing.
+
+    Cost = (input_tokens × in_price + output_tokens × out_price) / 1e6.
+    """
+    in_price = summary.get("cost_per_1M_input", 0)
+    out_price = summary.get("cost_per_1M_output", 0)
+    if in_price == 0 and out_price == 0:
+        return None
+    return (
+        summary["input_tokens"] * in_price
+        + summary["output_tokens"] * out_price
+    ) / 1_000_000
+
+
+def _report_rank_key(summary):
+    """Report order: score, then time, then cost, then tokens.
+
+    The score is the verified one (`verified_accuracy`, the same figure
+    `_score_cell` prints), and it dominates outright — a faster or cheaper row
+    never climbs above a more accurate one. Accuracy and time come from
+    `trials._rank_key`, the project's one ranking rule, so the report and the
+    permanent record cannot drift apart; this only refines its cost step,
+    spending dollars where pricing is known instead of tokens as a proxy.
+
+    A row nothing verified has no score to stand on and sorts last whatever
+    its time.
+    """
+    base = _rank_key({**summary, "accuracy": summary["verified_accuracy"]})
+    cost = _total_cost(summary)
+    return (
+        summary["verification_source"] == "none",
+        base[0],                                  # -accuracy
+        base[1],                                  # avg_elapsed_s, unknown last
+        cost if cost is not None else float("inf"),
+        base[2],                                  # total_tokens
+    )
 
 
 def _cost_cell(summary):
@@ -755,14 +1186,9 @@ def _cost_cell(summary):
     """
     if not _is_perfect(summary):
         return "-"
-    in_price = summary.get("cost_per_1M_input", 0)
-    out_price = summary.get("cost_per_1M_output", 0)
-    if in_price == 0 and out_price == 0:
+    cost = _total_cost(summary)
+    if cost is None:
         return "-"
-    cost = (
-        summary["input_tokens"] * in_price
-        + summary["output_tokens"] * out_price
-    ) / 1_000_000
     return f"${cost:.2f}"
 
 
@@ -805,12 +1231,72 @@ def unverified_claims(report):
     return out
 
 
+def format_source(report, *, markdown=False, label=True):
+    """One line naming every file the report was built from.
+
+    Printed first by all three formats, because a table that outlives its
+    context — pasted into an issue, a commit message, a chat — is only
+    interpretable if it says which run it describes — down to which rows came
+    from the results dir and which from the permanent trial record. Nothing
+    here calls the network.
+    """
+    t = report["totals"]
+    n_state = sum(1 for s in report["summaries"] if s.get("harness"))
+    n_legacy = sum(
+        1 for s in report["summaries"]
+        if s.get("record_path") and Path(s["record_path"]).parent.name != FINAL_SUBDIR
+    )
+    graded = f"{report['results_dir']}/{FINAL_SUBDIR}/*.json ({t['graded_models']} graded"
+    graded += f", {n_legacy} from the pre-final/ layout)" if n_legacy else ")"
+    bits = [
+        graded,
+        f"{report['solutions_dir']}/*/.harness_state.json ({n_state})",
+    ]
+    if report["n_puzzles"]:
+        bits.append(
+            f"{report['results_dir']}/puzzles.json ({report['n_puzzles']} puzzles)"
+        )
+    if report.get("models_file"):
+        bits.append(f"{report['models_file']} (model IDs, types, prices)")
+
+    trial = report.get("trial") or {}
+    if trial.get("files"):
+        detail = f"{trial.get('n_from_trial', 0)} row(s)"
+        beaten = trial.get("n_beaten", 0)
+        if beaten:
+            detail += f", {beaten} beaten by results/"
+        same_run = trial.get("n_same_run", 0)
+        if same_run:
+            detail += f", {same_run} recorded from this very run"
+        unrecorded = trial.get("n_unrecorded", 0)
+        if unrecorded:
+            detail += f", {unrecorded} not in the record"
+        bits.append(", ".join(trial["files"]) + f" (recorded best; {detail})")
+    elif trial.get("dir"):
+        bits.append(f"no trial in {trial['dir']}/ matches these puzzles")
+    else:
+        bits.append("trials not read")
+
+    check = report.get("image_check")
+    if check is None:
+        note = "solution PNGs not re-read"
+    elif check["all_ok"]:
+        note = "solution PNGs re-read locally"
+    else:
+        note = "local PNG re-read failed its own check"
+
+    body = " + ".join(bits) + f"; {note}."
+    if not label:
+        return body
+    return ("**Source:** " if markdown else "Source: ") + body
+
+
 def format_text(report, *, hide_errors=False):
     """Human-readable report for a terminal."""
     out = []
     mix = ", ".join(f"{k}: {v}" for k, v in report["difficulty_mix"].items())
     t = report["totals"]
-    out.append(f"=== {report['results_dir']} ===")
+    out.append(format_source(report))
     out.append(
         f"{report['n_puzzles']} puzzles"
         + (f" ({mix})" if mix else " (puzzles.json missing)")
@@ -857,9 +1343,12 @@ def format_text(report, *, hide_errors=False):
         for i, s in enumerate(report["summaries"], 1):
             imgs = f"{s['n_output_images']}/{s['n_puzzles']}"
             mw = "yes" if s.get("middleware") else " --"
+            # The unit rides on the value, so a few rows pasted without the
+            # header still say what the number is.
+            avg = f"{s['avg_elapsed_s']:.1f}s"
             row = (
                 f"{i:>2}  {s['model']:<38} {s.get('type', 'V'):>4} {mw:>3} {_score_cell(s):>7} "
-                f"{s['avg_elapsed_s']:>8.1f} {_cost_cell(s):>8} {_cost_per_hour_cell(s):>8} "
+                f"{avg:>8} {_cost_cell(s):>8} {_cost_per_hour_cell(s):>8} "
                 f"{_claimed(s):>8} {imgs:>6} "
                 f"{s['input_tokens']:>11,} {s['output_tokens']:>11,}"
             )
@@ -868,16 +1357,29 @@ def format_text(report, *, hide_errors=False):
             out.append(row)
         out.append("")
         out.append(
-            "  mw      = vision middleware was active during this run (yes / --)."
+            "  mw      = the model's rounds carried a transcription as image "
+            "alt text (yes), or"
         )
         out.append(
-            "  score   = grader-verified correct when the grading API returned "
-            "verdicts, otherwise"
+            "            did not — including runs too old to record it (--)."
         )
         out.append(
-            "            locally transcribed and checked against the clues and "
-            "Sudoku rules."
+            "  score   = correct out of total, from the strongest verification "
+            "this row has:"
         )
+        out.append(
+            "            the recorded trial, else the local transcription "
+            "check, else the grader."
+        )
+        if any(_beat_trial(x) for x in report["summaries"]):
+            out.append(
+                "  *       = this results dir beat the recorded trial for this "
+                "puzzle set — a new"
+            )
+            out.append(
+                "            best. Unmarked rows come from the record, which "
+                "outlives results/."
+            )
         out.append(
             "  cost    = total API spend at published OpenRouter prices, shown "
             "only for models"
@@ -896,8 +1398,8 @@ def format_text(report, *, hide_errors=False):
             "            finished and wrote an image. Its own word, never checked."
         )
         out.append(
-            "  Ranked on the same correctness signal that fills `score`; never "
-            "on `claimed`."
+            "  Ranked on `score` first, then avg s, then cost — never on "
+            "`claimed`."
         )
 
     tables = {s["safe_name"]: _per_difficulty(s) for s in report["summaries"]}
@@ -1081,6 +1583,8 @@ def format_markdown(report, *, hide_errors=False):
     mix = ", ".join(f"{k}: {v}" for k, v in report["difficulty_mix"].items())
     t = report["totals"]
     out = [
+        format_source(report, markdown=True),
+        "",
         f"{report['n_puzzles']} puzzles"
         + (f" ({mix})" if mix else " (puzzles.json missing)"),
         "",
@@ -1099,7 +1603,7 @@ def format_markdown(report, *, hide_errors=False):
         mw = "yes" if s.get("middleware") else "--"
         row = (
             f"| {i} | `{s['model']}` | {s.get('type', 'V')} | {mw} | {_score_cell(s)} | "
-            f"{s['avg_elapsed_s']:.1f} | {_cost_cell(s)} | {_cost_per_hour_cell(s)} | "
+            f"{s['avg_elapsed_s']:.1f}s | {_cost_cell(s)} | {_cost_per_hour_cell(s)} | "
             f"{s['n_output_images']}/{s['n_puzzles']} | "
             f"{s['input_tokens']:,} | {s['output_tokens']:,}"
         )
@@ -1108,6 +1612,13 @@ def format_markdown(report, *, hide_errors=False):
         else:
             row += f" | {s['n_errors']} |"
         out.append(row)
+    if any(_beat_trial(s) for s in report["summaries"]):
+        out.append("")
+        out.append(
+            "`*` — this results dir beat the recorded trial for this puzzle "
+            "set: a new best. Unmarked rows come from the record."
+        )
+
     check = report.get("image_check")
     if check is not None and not check["all_ok"]:
         out.append("")
@@ -1145,6 +1656,7 @@ def leaderboard(report):
     drop = {
         "safe_name", "pngs_on_disk", "errors", "harness", "graded", "source",
         "local", "grader_verdicts", "n_verdicts", "verified_accuracy",
+        "record_path",
     }
     out = []
     for s in report["summaries"]:
