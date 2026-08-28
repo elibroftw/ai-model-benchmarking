@@ -42,7 +42,7 @@ proprietary = [
     { id = "anthropic/claude-fable-5", expensive = true },
     { id = "anthropic/claude-opus-5", expensive = true },
     { id = "anthropic/claude-sonnet-5", expensive = true },
-    "qwen/qwen3.8-flash",
+    # "qwen/qwen3.8-flash",
     "qwen/qwen3.8-max",
     "x-ai/grok-4.6",
 ]
