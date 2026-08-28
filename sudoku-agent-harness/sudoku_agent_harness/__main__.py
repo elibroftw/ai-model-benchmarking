@@ -31,8 +31,24 @@ def _load_env():
     load_dotenv()
 
 
+def _temperature(value):
+    """A float, or `none` for "send no temperature at all"."""
+    if value.strip().lower() in ("none", "default", "provider"):
+        return None
+    try:
+        return float(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError(
+            f"temperature must be a number or `none`, not {value!r}"
+        ) from None
+
+
 def main():
     _load_env()
+
+    # Imported here rather than at module scope so `--help` still avoids
+    # importing smolagents.
+    from .agent import FROM_CONFIG
 
     parser = argparse.ArgumentParser(
         description="Agentic file-in/file-out harness (smolagents + OpenRouter). "
@@ -90,6 +106,19 @@ def main():
         "input set are skipped, so an interrupted run can be restarted.",
     )
     parser.add_argument(
+        "--temperature",
+        type=_temperature,
+        default=FROM_CONFIG,
+        help="Sampling temperature for every generation. Defaults to "
+        "[harness].temperature in the models.toml the harness finds (see "
+        "--models-config), which is where the benchmark pins it. Pass `none` "
+        "to send no temperature at all and leave the provider's own default "
+        "in force — two runs are then only comparable if that default never "
+        "changed. A model that rejects an explicit temperature (many "
+        "reasoning models accept only their own) is detected and finishes the "
+        "session without one.",
+    )
+    parser.add_argument(
         "--models-config",
         default=None,
         help="Path to a TOML file mapping model IDs to custom endpoint "
@@ -113,6 +142,7 @@ def main():
             archive_dir=Path(args.archive_dir) if args.archive_dir else None,
             fresh=args.fresh,
             send_images=not args.no_image,
+            temperature=args.temperature,
             models_config=(
                 Path(args.models_config) if args.models_config else None
             ),

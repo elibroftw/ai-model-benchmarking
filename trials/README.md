@@ -14,7 +14,7 @@ After running the benchmark, even if it fails mid-way the following command read
 | 2 | `openai/gpt-5.6-sol` | V | yes | 3/3 | 70.5s | $0.37 | $6.25 | 3/3 | 48,229 | 17,419 |
 | 3 | `openai/gpt-5.6-terra-pro` | V | -- | 3/3 | 97.1 | $1.73 | $21.36 | 3/3 | 464,384 | 66,577 |
 | 4 | `anthropic/claude-opus-5` | V | -- | 3/3 | 99.7 | $1.48 | $17.83 | 3/3 | 154,825 | 28,293 |
-| 5 | `anthropic/claude-fable-5` | V | -- | 3/3 | 131.4 | $3.83 | $34.97 | 3/3 | 195,142 | 37,557 |
+| 5 | `anthropic/claude-fable-5` | V | yes | 3/3 | 105.3s | $2.93 | $33.34 | 3/3 | 145,111 | 29,483 |
 | 6 | `openai/gpt-5.6-sol-pro` | V | -- | 3/3 | 141.4 | $1.78 | $15.08 | 3/3 | 288,251 | 62,336 |
 | 7 | `meta/muse-spark-1.2` | V | -- | 3/3 | 142.4s | $0.62 | $5.22 | 3/3 | 158,599 | 99,192 |
 | 8 | `z-ai/glm-5.3-flash` | T | -- | 3/3 | 173.3s | $0.07 | $0.50 | 3/3 | 224,641 | 75,772 |
@@ -50,6 +50,8 @@ Vision improved not just text-only models like deepseek-v4-pro, but also vision-
 | - | `openai/gpt-5.6-sol` | V | -- | 3/3 | 97.9 | $0.70 | $8.55 | 3/3 | 119,367 | 22,039 |
 | - | `deepseek/deepseek-v4-pro-0813` | T | yes | 3/3 | 273.3s | $0.25 | $1.09 | 3/3 | 183,190 | 64,437 |
 | - | `deepseek/deepseek-v4-pro-0813` | T | -- | 3/3 | 310.2 | $0.52 | $2.03 | 3/3 | 608,433 | 62,039 |
+| - | `anthropic/claude-fable-5` | V | yes | 3/3 | 105.3s | $2.93 | $33.34 | 3/3 | 145,111 | 29,483 |
+| - | `anthropic/claude-fable-5` | V | -- | 3/3 | 131.4 | $3.83 | $34.97 | 3/3 | 195,142 | 37,557 |
 
 Some models saw worse performance, which to me suggests that these models weren't honestly thinking in the first place.
 Proper tracing is required to ensure these models did not cheat to begin with.

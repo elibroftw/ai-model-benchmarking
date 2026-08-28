@@ -276,11 +276,11 @@ uv run sudoku-agent-harness --model openai/gpt-4o \
 ### Custom endpoints (LM Studio, Ollama, vLLM, etc.)
 
 Models served locally through an OpenAI-compatible API can be wired in
-via `models.toml`.  Add an entry under `[custom_models]` and pass both
-`--model` (matching the key) and `--models-config`:
+via `models.toml`.  Add an entry under `[custom_models]` and pass `--model`
+with the key:
 
 ```toml
-# models.toml (in the harness root, or anywhere you point --models-config to)
+# models.toml — the calling project's, at its repo root
 [custom_models."qwen3.8-27b@q8_k_xl"]
 provider = "openai"
 model_name = "qwen3.8-27b@q8_k_xl"
@@ -290,10 +290,17 @@ api_key = "not-needed"
 
 ```sh
 uv run sudoku-agent-harness --model "qwen3.8-27b@q8_k_xl" \
-    --models-config models.toml \
     --task ../sudoku-vision-benchmark/results/task.json \
     --inputs-dir puzzles/ --output-dir solutions/
 ```
+
+The file is found without being named: the working directory first, then
+upwards to the enclosing repository (stopping at its root, so an unrelated
+`models.toml` further up is never read), and finally the harness's own
+directory.  The manifest belongs to the project being benchmarked — it is the
+same file that lists the models, their prices and which are disabled — so the
+harness reads the caller's rather than keeping a competing copy.
+`--models-config` still overrides the search with an explicit path.
 
 The harness resolves `--model` against `[custom_models]` first; when it
 matches a key, the LiteLLM model is constructed with those settings
@@ -301,6 +308,31 @@ instead of the default OpenRouter path.  When there is no match, the
 original OpenRouter behaviour (environment variable + `openrouter/`
 prefix) is used, so a `models.toml` with only a few entries does not
 affect the rest.
+
+### Temperature
+
+Every generation is sent at a pinned temperature.  The value comes from
+`[harness].temperature` in the same `models.toml` the custom endpoints live in
+— it is a property of the benchmark, not of this runner — and the shipped one
+is `0.1`:
+
+```toml
+[harness]
+temperature = 0.1   # or "none" to send no temperature at all
+```
+
+Providers otherwise apply their own default — commonly `1.0`, and free to
+change — which is enough to make two runs of the same model incomparable.
+`--temperature` overrides the file for one run; `--temperature none` sends
+nothing and accepts the provider default.  With no manifest at all the harness
+falls back to `0.1` rather than inheriting a default that can move underneath
+the results.
+
+Many reasoning models only accept their own default and reject the parameter
+outright.  That is detected on the round it happens: the setting is dropped
+for the rest of the session, the round is re-run, and every round record
+carries the `temperature` it actually ran at (`null` after a fallback) so the
+report can tell the two apart.
 
 ## Alternative harnesses
 

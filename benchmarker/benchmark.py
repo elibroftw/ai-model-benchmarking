@@ -98,6 +98,7 @@ class Benchmark:
         vision_middleware=False,
         vision_middleware_cmd=None,
         vision_middleware_config=None,
+        temperature=None,
     ):
         self.models = models
         self.n_puzzles = n_puzzles
@@ -127,6 +128,10 @@ class Benchmark:
             else DEFAULT_VISION_MIDDLEWARE_CMD
         )
         self.vision_middleware_config = vision_middleware_config
+        # Passed to the harness only when set, so a harness that does not take
+        # --temperature still works: the flags this sends are a contract with
+        # any harness, not just the one in this repo.
+        self.temperature = temperature
         # puzzle id → seconds the middleware spent transcribing that
         # image. Charged to every model's round for that puzzle, so a
         # middleware run's times stay comparable with a run without it.
@@ -206,6 +211,8 @@ class Benchmark:
         # file rather than re-run.
         if self.fresh:
             argv.append("--fresh")
+        if self.temperature is not None:
+            argv += ["--temperature", str(self.temperature)]
         # Strip VIRTUAL_ENV so `uv run --project ...` doesn't warn about the
         # benchmarker's active venv clashing with the harness's project venv.
         env = {k: v for k, v in os.environ.items() if k != "VIRTUAL_ENV"}
@@ -304,6 +311,7 @@ class Benchmark:
             # ran the other way. Copied so a graded record says for itself
             # whether it had alt text, without consulting the state file.
             record["middleware"] = round_rec.get("middleware")
+            record["temperature"] = round_rec.get("temperature")
             record["input_tokens"] = round_rec.get("input_tokens")
             record["output_tokens"] = round_rec.get("output_tokens")
             record["total_tokens"] = round_rec.get("total_tokens")

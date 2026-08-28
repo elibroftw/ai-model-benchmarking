@@ -116,6 +116,34 @@ def build_prompt(spec: dict, *, round_number: int, n_rounds: int,
     return template
 
 
+def default_models_config() -> Path | None:
+    """The models.toml to read [custom_models] from when none was named.
+
+    The manifest belongs to the project being benchmarked, not to the harness:
+    the benchmarker keeps one models.toml at its repo root listing the models,
+    their prices and any custom endpoints, and it invokes the harness from
+    there. So the working directory is checked first, then the harness repo
+    itself, which keeps a standalone `sudoku-agent-harness --model ...` working
+    from inside its own checkout.
+
+    Returns None when neither exists — custom endpoints are optional, and a
+    model ID with no entry simply goes to OpenRouter.
+    """
+    here = Path.cwd().resolve()
+    # The working directory, then upwards to the enclosing repository — so
+    # running the harness from a subdirectory finds the project's manifest.
+    # Bounded at the repo root so an unrelated models.toml further up the
+    # filesystem can never be picked up.
+    for directory in (here, *here.parents):
+        candidate = directory / "models.toml"
+        if candidate.exists():
+            return candidate
+        if (directory / ".git").exists():
+            break
+    fallback = Path(__file__).resolve().parent.parent / "models.toml"
+    return fallback if fallback.exists() else None
+
+
 def default_archive_dir() -> Path:
     """`archive/` at the harness repo root, regardless of the caller's cwd."""
     return Path(__file__).resolve().parent.parent / "archive"
@@ -201,6 +229,72 @@ TRANSIENT_RETRY_DELAY = 5
 # outright with "tenacity import failed" — every round of every model dies in
 # milliseconds. The round-level retry above covers the same failures without
 # needing it.
+
+
+# Where the temperature actually lives is `[harness].temperature` in the
+# calling project's models.toml (see `_config_temperature`): it is a property
+# of the benchmark being run, not of this runner. This is only the fallback
+# for a run with no manifest at all — pinning something beats inheriting a
+# provider default that can change under the results.
+DEFAULT_TEMPERATURE = 0.1
+
+# Distinguishes "the caller said nothing" from "the caller said None", which
+# means send no temperature at all. Only the first consults the manifest.
+FROM_CONFIG = object()
+
+
+def _config_temperature(config_path):
+    """`[harness].temperature` from the models.toml, or the fallback.
+
+    Accepts a number, or "none"/"default"/"provider" for send-nothing. A value
+    that is neither is reported and ignored rather than raising: a typo in an
+    optional setting should not cost a whole session.
+    """
+    import tomllib
+
+    if config_path is None:
+        return DEFAULT_TEMPERATURE
+    try:
+        data = tomllib.loads(Path(config_path).read_text())
+    except (OSError, tomllib.TOMLDecodeError) as e:
+        print(f"[harness] could not read {config_path}: {e}", file=sys.stderr)
+        return DEFAULT_TEMPERATURE
+    section = data.get("harness")
+    if not isinstance(section, dict) or "temperature" not in section:
+        return DEFAULT_TEMPERATURE
+    value = section["temperature"]
+    if isinstance(value, str):
+        if value.strip().lower() in ("none", "default", "provider"):
+            return None
+    elif isinstance(value, (int, float)) and not isinstance(value, bool):
+        return float(value)
+    print(
+        f"[harness] ignoring [harness].temperature={value!r} in {config_path}: "
+        f"expected a number or \"none\"",
+        file=sys.stderr,
+    )
+    return DEFAULT_TEMPERATURE
+
+
+def _is_temperature_unsupported_error(exc) -> bool:
+    """True if the model rejected the request because of `temperature`.
+
+    Reasoning models commonly accept only their own default — OpenAI answers
+    "Unsupported value: 'temperature' does not support 0.1 with this model.
+    Only the default (1) value is supported." Matched on the substance, since
+    every provider words it differently; a request that failed for some other
+    reason must not lose the setting.
+    """
+    msg = str(exc).lower()
+    if "temperature" not in msg:
+        return False
+    return any(
+        phrase in msg
+        for phrase in (
+            "unsupported", "not support", "only the default", "not allowed",
+            "cannot be used", "invalid", "unrecognized",
+        )
+    )
 
 
 def _is_transient_provider_error(exc) -> bool:
@@ -593,6 +687,7 @@ def run(
     fresh: bool = False,
     send_images: bool = True,
     models_config: Path | None = None,
+    temperature=FROM_CONFIG,
 ) -> dict:
     """Run the agentic harness across a whole directory of task inputs.
 
@@ -623,18 +718,29 @@ def run(
             automatically, switching to the task's `text_only` prompts. Pass
             False to skip the failed attempt when you already know the model is
             text-only.
+        temperature: Sampling temperature sent with every generation.
+            Omitted (or ``FROM_CONFIG``) takes it from
+            ``[harness].temperature`` in the models.toml below, which is where
+            the benchmark pins it; None sends no temperature at all, leaving
+            each provider's own default in force — which is what makes two
+            runs incomparable, so prefer a number. A model that rejects an
+            explicit temperature is detected on the round it happens and
+            finishes the session without one.
         models_config: Path to a TOML file whose [custom_models] table maps
             model IDs to custom endpoint settings (provider, model_name,
             api_base, api_key). When ``model_id`` matches a key in that table
             the harness uses those settings to construct the LiteLLM model
-            instead of the default OpenRouter path. Pass None (or omit) for
-            the default behaviour.
+            instead of the default OpenRouter path. Omit it to look for
+            `models.toml` where `default_models_config` says — the caller's
+            own manifest, then the harness's — which is how the benchmarker's
+            top-level models.toml is picked up without being passed.
 
     Returns:
         dict with `success` (bool), `rounds` (list of per-round records),
         `n_solved` (int), `total_elapsed` (float), `error` (str, optional).
-        Each round record carries `middleware`: whether the task spec supplied
-        a transcription for that round's input. Each round is also emitted as
+        Each round record carries `middleware` (whether the task spec supplied
+        a transcription for that round's input) and `temperature` (what the
+        round was actually generated at). Each round is also emitted as
         one JSONL line on stdout as it completes, and saved to the state file.
     """
     from rich.console import Console
@@ -645,6 +751,10 @@ def run(
         raise RuntimeError("OPENROUTER_API_KEY not set (check .env file).")
 
     # Resolve custom model config before falling back to OpenRouter.
+    if models_config is None:
+        models_config = default_models_config()
+    if temperature is FROM_CONFIG:
+        temperature = _config_temperature(models_config)
     custom = _resolve_custom_model(model_id, models_config)
     if custom is not None:
         litellm_model_id = f"{custom['provider']}/{custom['model_name']}"
@@ -692,7 +802,13 @@ def run(
         model_id=litellm_model_id,
         api_key=litellm_api_key,
         api_base=litellm_api_base,
+        # Forwarded to the completion call. Omitted entirely when None, so the
+        # request carries no `temperature` field rather than one the endpoint
+        # has to interpret.
+        **({} if temperature is None else {"temperature": temperature}),
     )
+    if temperature is not None:
+        print(f"[harness] temperature={temperature}", file=sys.stderr)
     deadline = _RoundDeadline(timeout)
     agent = CodeAgent(
         tools=[],
@@ -857,6 +973,28 @@ def run(
                             )
                             break
                         except Exception as e:
+                            if (model.kwargs.get("temperature") is not None
+                                    and _is_temperature_unsupported_error(e)):
+                                # This model accepts only its own default. Drop
+                                # the setting for the rest of the session and
+                                # re-run the round; the alternative is failing
+                                # every round of a model that works fine.
+                                model.kwargs.pop("temperature", None)
+                                print(
+                                    f"[harness] model rejects "
+                                    f"temperature={temperature}; continuing "
+                                    f"with the provider's default for the rest "
+                                    f"of this session",
+                                    file=sys.stderr,
+                                    flush=True,
+                                )
+                                deadline.reset()
+                                final_answer = agent.run(
+                                    prompt,
+                                    reset=first_executed,
+                                    **({"images": [img]} if send_images else {}),
+                                )
+                                break
                             if send_images and _is_no_image_support_error(e):
                                 # Text-only model: drop the attachment for the
                                 # rest of the session and retry this round with
@@ -945,6 +1083,10 @@ def run(
                     # >1 when a transient provider failure cost this round an
                     # extra attempt; its time and tokens are all counted here.
                     "attempts": attempt + 1,
+                    # What this round was actually generated at: null once a
+                    # model that refuses the setting has fallen back to the
+                    # provider's own default.
+                    "temperature": model.kwargs.get("temperature"),
                     "elapsed": elapsed,
                     "input_tokens": round_in,
                     "output_tokens": round_out,

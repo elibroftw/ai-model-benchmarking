@@ -40,8 +40,9 @@ proprietary = [
     "openai/gpt-5.6-terra",
     "openai/gpt-5.6-terra-pro",
     { id = "anthropic/claude-fable-5", expensive = true },
-    "anthropic/claude-opus-5",
-    "anthropic/claude-sonnet-5",
+    { id = "anthropic/claude-opus-5", expensive = true },
+    { id = "anthropic/claude-sonnet-5", expensive = true },
+    "qwen/qwen3.8-flash",
     "qwen/qwen3.8-max",
     "x-ai/grok-4.6",
 ]
@@ -124,3 +125,44 @@ disabled = [
 [vision]
 # used for converting completed sudoku to be graded as well as the vision middleware for converting puzzles into transcriptions
 model = "google/gemma-4-26b-a4b-it"
+
+# Settings for the agent harness itself, read from this file by whichever
+# harness the benchmark invokes.
+[harness]
+# Sampling temperature for every generation. Low but not zero: the benchmark
+# wants each model's ordinary behaviour reproducibly, and a hard 0 makes some
+# models loop on a failed approach rather than vary it. Providers otherwise
+# apply their own default — commonly 1.0, and free to change under you — so
+# pinning it here is what makes two runs of the same model comparable at all.
+# Set to "none" to send no temperature and accept each provider's default.
+# Models that reject an explicit temperature (most reasoning models do) fall
+# back to their own default for the rest of that session, and each round
+# records what it actually ran at.
+temperature = 0.1
+
+# Custom model endpoints for the agent harness.
+#
+# Every key under [custom_models] is a model ID you can pass to --model.
+# When that ID matches a key here, the corresponding LiteLLM settings are used
+# INSTEAD of the default OpenRouter path.  LiteLLM prefixes the `provider` to
+# the `model_name` so its router picks the right completion path
+# (e.g. "openai/qwen3.8-27b").
+#
+#   provider    LiteLLM provider prefix (openai, anthropic, etc.)
+#   model_name  the name the endpoint knows the model by
+#   api_base    base URL of the OpenAI-compatible server
+#   api_key     auth key; "not-needed" for servers that don't check it
+#
+# Example: LM Studio running a local Qwen model on port 1234.
+#
+#   [custom_models.local-qwen]
+#   provider = "openai"
+#   model_name = "qwen3.8-27b"
+#   api_base = "http://127.0.0.1:1234/v1"
+#   api_key = "not-needed"
+
+[custom_models."qwen3.8-27b@q8_k_xl"]
+provider = "openai"
+model_name = "qwen3.8-27b@q8_k_xl"
+api_base = "http://127.0.0.1:1234/v1"
+api_key = "not-needed"

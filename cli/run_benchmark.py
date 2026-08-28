@@ -245,6 +245,15 @@ def main():
         help="Per-puzzle timeout in seconds passed to the harness. Default is 20 minutes.",
     )
     parser.add_argument(
+        "--temperature",
+        type=float,
+        default=None,
+        help="Sampling temperature, forwarded to the harness as --temperature. "
+        "Omitted by default, which leaves the harness on its own default "
+        "(0.1 for the one in this repo) and keeps the flags sent to a "
+        "substituted harness to the documented set.",
+    )
+    parser.add_argument(
         "--fresh",
         action="store_true",
         help="Forwarded to the harness: ignore its saved state and redo every "
@@ -381,6 +390,7 @@ def main():
         vision_middleware=args.vision_middleware,
         vision_middleware_cmd=args.vision_middleware_cmd,
         vision_middleware_config=args.vision_middleware_config,
+        temperature=args.temperature,
     )
     try:
         bench.run()
