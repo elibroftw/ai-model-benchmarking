@@ -22,7 +22,6 @@ open-weight = [
     # will train on requests
     # "deepseek/deepseek-v4-flash-vision-exp"
     "z-ai/glm-5.3-flash",
-    "deepseek/deepseek-v4-flash-vision-exp",
     { id = "moonshotai/kimi-k3", expensive = true },
     # text-only
     "deepseek/deepseek-v4-pro-0813",
@@ -71,6 +70,7 @@ disabled = [
     "meta/muse-glimmer-30b",
     "qwen/qwen3.8-2.4t-a95b",
     "google/gemma-4-31b-it",
+    "deepseek/deepseek-v4-flash-vision-exp",
     # Nov 2025 release - 2/3
     "anthropic/claude-opus-4.8",
     "anthropic/claude-opus-4.5",
