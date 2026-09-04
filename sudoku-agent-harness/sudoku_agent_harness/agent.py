@@ -825,7 +825,7 @@ def run(
             # Data handling
             "json", "base64", "re", "collections", "itertools", "math",
             # Shell / external tools
-            "subprocess",
+            "subprocess", "sys"
         ],
         max_steps=100,
         stream_outputs=True,

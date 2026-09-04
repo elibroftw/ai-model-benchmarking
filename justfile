@@ -22,13 +22,13 @@ _preliminary *FLAGS:
         -v {{FLAGS}}
 
 # Preliminary run: the small seeded set, straight to the models.
-preliminary *FLAGS: (_preliminary)
+preliminary *FLAGS: (_preliminary " " + FLAGS)
 
 # Preliminary run through the vision middleware (alt text for every puzzle).
-preliminary-v *FLAGS: (_preliminary "--vision-middleware --fresh")
+preliminary-v *FLAGS: (_preliminary "--vision-middleware --fresh " + FLAGS)
 
 # The same set for ONE model, by full id or unique substring: `just one glm-5.3-flash`
-one MODEL *FLAGS: (_preliminary "--model " + MODEL + " " + FLAGS)
+one MODEL *FLAGS: (_preliminary "--model " + MODEL + " --fresh" + FLAGS)
 
 # One model through the vision middleware. e.g. `just one-v glm-5.3-flash`
 one-v MODEL *FLAGS: (_preliminary "--model " + MODEL + " --vision-middleware --fresh " + FLAGS)
@@ -42,16 +42,16 @@ v-mw-bench:
     uv run vision-middleware/compare_vision_models.py
 
 # Rebuild the leaderboard from results/, verifying every solution PNG locally.
-summarize *FLAGS:
+summary *FLAGS:
     {{SUMMARIZE}} {{FLAGS}}
 
 # The same report as a pasteable markdown table.
-summarize-md *FLAGS:
+summary-md *FLAGS:
     {{SUMMARIZE}} --format markdown --hide-errors {{FLAGS}}
 
 # The same report without the image-verification pass — faster, and correctness
 # then rests on the run's own grader verdicts.
-summarize-quick *FLAGS:
+summary-quick *FLAGS:
     {{SUMMARIZE}} --no-verify-images {{FLAGS}}
 
 # Summarize and (re)write results/leaderboard-<harness>.json.
