@@ -25,7 +25,7 @@ _preliminary *FLAGS:
 preliminary *FLAGS: (_preliminary " " + FLAGS)
 
 # Preliminary run through the vision middleware (alt text for every puzzle).
-preliminary-v *FLAGS: (_preliminary "--vision-middleware --fresh " + FLAGS)
+preliminary-v *FLAGS: (_preliminary "--vision-middleware " + FLAGS)
 
 # The same set for ONE model, by full id or unique substring: `just one glm-5.3-flash`
 one MODEL *FLAGS: (_preliminary "--model " + MODEL + " --fresh" + FLAGS)

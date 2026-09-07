@@ -5,7 +5,7 @@
   "difficulty": "mixed",
   "puzzle_fingerprint": "f42eb002956177cf75600157e616c6a5fe9fa142ae4ede4c71db6ac470bafbce",
   "created_at": "2026-08-22T10:33:26+00:00",
-  "updated_at": "2026-09-04T03:58:51+00:00",
+  "updated_at": "2026-09-07T19:17:04+00:00",
   "entries": [
     {
       "model": "openai/gpt-5.6-terra",
@@ -163,6 +163,60 @@
       "recorded_at": "2026-08-23T04:50:59+00:00",
       "runs": 1,
       "middleware": false
+    },
+    {
+      "model": "openai/gpt-6-astra",
+      "n_puzzles": 3,
+      "n_correct": 3,
+      "n_errors": 0,
+      "n_output_images": 3,
+      "output_rate": 1.0,
+      "accuracy": 1.0,
+      "avg_elapsed_s": 87.64225635031904,
+      "input_tokens": 123840,
+      "output_tokens": 10481,
+      "total_tokens": 134321,
+      "tokens_per_correct": 44773.666666666664,
+      "per_difficulty": {
+        "easy": {
+          "n": 1,
+          "correct": 1
+        },
+        "medium": {
+          "n": 1,
+          "correct": 1
+        },
+        "hard": {
+          "n": 1,
+          "correct": 1
+        }
+      },
+      "learning": {
+        "warmup_elapsed_s": 104.62828555698343,
+        "warmup_correct": true,
+        "warmup_total_tokens": 56958,
+        "steady_state_avg_elapsed_s": 79.14924174698686,
+        "steady_state_avg_total_tokens": 38681.5,
+        "steady_state_accuracy": 1.0,
+        "speedup_after_warmup": 1.3219114074578804
+      },
+      "session": {
+        "summary": true,
+        "n_puzzles": 3,
+        "n_rounds": 3,
+        "n_solved": 3,
+        "n_resumed": 0,
+        "interrupted": false,
+        "total_elapsed": 262.932,
+        "total_input_tokens": 123840,
+        "total_output_tokens": 10481,
+        "harness_total_elapsed": 243.49619596698903,
+        "transcription_elapsed": 19.436
+      },
+      "middleware": true,
+      "recorded_at": "2026-09-07T19:11:03+00:00",
+      "rev": "cf589d4-dirty",
+      "runs": 1
     },
     {
       "model": "openai/gpt-5.6-terra-pro",
@@ -795,8 +849,8 @@
       "middleware": true,
       "recorded_at": "2026-08-27T06:18:23+00:00",
       "rev": "e756ec8-dirty",
-      "runs": 3,
-      "last_attempt_at": "2026-08-27T16:05:51+00:00"
+      "runs": 4,
+      "last_attempt_at": "2026-09-07T19:16:42+00:00"
     },
     {
       "model": "meta/muse-spark-1.2",
@@ -1170,13 +1224,14 @@
       "middleware": true,
       "recorded_at": "2026-09-03T03:38:59+00:00",
       "rev": "c7ed615-dirty",
-      "runs": 2,
+      "runs": 3,
       "previous_best": {
         "accuracy": 0.6666666666666666,
         "avg_elapsed_s": 1048.152055241999,
         "total_tokens": 561225,
         "recorded_at": "2026-09-02T21:47:55+00:00"
-      }
+      },
+      "last_attempt_at": "2026-09-07T19:16:50+00:00"
     },
     {
       "model": "z-ai/glm-5.3-flash",
@@ -1283,7 +1338,8 @@
       "middleware": true,
       "recorded_at": "2026-08-27T17:03:47+00:00",
       "rev": "8e9189a-dirty",
-      "runs": 1
+      "runs": 2,
+      "last_attempt_at": "2026-09-07T19:17:04+00:00"
     },
     {
       "model": "deepseek/deepseek-v4-pro-0813",
@@ -1544,14 +1600,14 @@
       "middleware": true,
       "recorded_at": "2026-08-27T15:42:39+00:00",
       "rev": "8e9189a-dirty",
-      "runs": 3,
+      "runs": 4,
       "previous_best": {
         "accuracy": 0.0,
         "avg_elapsed_s": 7.600506406674472,
         "total_tokens": 0,
         "recorded_at": "2026-08-27T13:56:59+00:00"
       },
-      "last_attempt_at": "2026-09-02T19:44:47+00:00"
+      "last_attempt_at": "2026-09-07T19:16:59+00:00"
     },
     {
       "model": "moonshotai/kimi-k3",
@@ -1922,6 +1978,66 @@
       "middleware": false
     },
     {
+      "model": "qwen/qwen3.8-27b",
+      "n_puzzles": 3,
+      "n_correct": 3,
+      "n_errors": 0,
+      "n_output_images": 3,
+      "output_rate": 1.0,
+      "accuracy": 1.0,
+      "avg_elapsed_s": 689.9345629449813,
+      "input_tokens": 202140,
+      "output_tokens": 162501,
+      "total_tokens": 364641,
+      "tokens_per_correct": 121547.0,
+      "per_difficulty": {
+        "easy": {
+          "n": 1,
+          "correct": 1
+        },
+        "medium": {
+          "n": 1,
+          "correct": 1
+        },
+        "hard": {
+          "n": 1,
+          "correct": 1
+        }
+      },
+      "learning": {
+        "warmup_elapsed_s": 651.6047116769869,
+        "warmup_correct": true,
+        "warmup_total_tokens": 99882,
+        "steady_state_avg_elapsed_s": 709.0994885789785,
+        "steady_state_avg_total_tokens": 132379.5,
+        "steady_state_accuracy": 1.0,
+        "speedup_after_warmup": 0.9189186033440667
+      },
+      "session": {
+        "summary": true,
+        "n_puzzles": 3,
+        "n_rounds": 3,
+        "n_solved": 3,
+        "n_resumed": 3,
+        "interrupted": false,
+        "total_elapsed": 19.437,
+        "total_input_tokens": 0,
+        "total_output_tokens": 0,
+        "harness_total_elapsed": 0.0009938809962477535,
+        "transcription_elapsed": 19.436
+      },
+      "middleware": true,
+      "recorded_at": "2026-09-07T19:16:54+00:00",
+      "rev": "cf589d4-dirty",
+      "runs": 2,
+      "previous_best": {
+        "accuracy": 0.6666666666666666,
+        "avg_elapsed_s": 854.7032020729936,
+        "total_tokens": 206415,
+        "recorded_at": "2026-08-27T16:48:28+00:00"
+      }
+    },
+    {
       "model": "openai/gpt-5.6-terra",
       "n_puzzles": 3,
       "n_correct": 2,
@@ -1973,6 +2089,60 @@
       "middleware": true,
       "recorded_at": "2026-08-27T20:10:53+00:00",
       "rev": "8e9189a-dirty",
+      "runs": 1
+    },
+    {
+      "model": "openai/gpt-6-astra-pro",
+      "n_puzzles": 3,
+      "n_correct": 2,
+      "n_errors": 1,
+      "n_output_images": 2,
+      "output_rate": 0.6666666666666666,
+      "accuracy": 0.6666666666666666,
+      "avg_elapsed_s": 112.32193360333571,
+      "input_tokens": 134358,
+      "output_tokens": 23547,
+      "total_tokens": 157905,
+      "tokens_per_correct": 78952.5,
+      "per_difficulty": {
+        "easy": {
+          "n": 1,
+          "correct": 0
+        },
+        "medium": {
+          "n": 1,
+          "correct": 1
+        },
+        "hard": {
+          "n": 1,
+          "correct": 1
+        }
+      },
+      "learning": {
+        "warmup_elapsed_s": 105.24027756401756,
+        "warmup_correct": false,
+        "warmup_total_tokens": 52577,
+        "steady_state_avg_elapsed_s": 115.86276162299478,
+        "steady_state_avg_total_tokens": 52664.0,
+        "steady_state_accuracy": 1.0,
+        "speedup_after_warmup": 0.9083183940191097
+      },
+      "session": {
+        "summary": true,
+        "n_puzzles": 3,
+        "n_rounds": 3,
+        "n_solved": 2,
+        "n_resumed": 0,
+        "interrupted": false,
+        "total_elapsed": 336.97,
+        "total_input_tokens": 134358,
+        "total_output_tokens": 23547,
+        "harness_total_elapsed": 317.5338828249951,
+        "transcription_elapsed": 19.436
+      },
+      "middleware": true,
+      "recorded_at": "2026-09-07T19:16:35+00:00",
+      "rev": "cf589d4-dirty",
       "runs": 1
     },
     {
@@ -2447,60 +2617,6 @@
       "recorded_at": "2026-08-22T10:33:26+00:00",
       "runs": 1,
       "middleware": false
-    },
-    {
-      "model": "qwen/qwen3.8-27b",
-      "n_puzzles": 3,
-      "n_correct": 2,
-      "n_errors": 1,
-      "n_output_images": 3,
-      "output_rate": 1.0,
-      "accuracy": 0.6666666666666666,
-      "avg_elapsed_s": 854.7032020729936,
-      "input_tokens": 128984,
-      "output_tokens": 77431,
-      "total_tokens": 206415,
-      "tokens_per_correct": 103207.5,
-      "per_difficulty": {
-        "easy": {
-          "n": 1,
-          "correct": 1
-        },
-        "medium": {
-          "n": 1,
-          "correct": 1
-        },
-        "hard": {
-          "n": 1,
-          "correct": 0
-        }
-      },
-      "learning": {
-        "warmup_elapsed_s": 654.0647116769869,
-        "warmup_correct": true,
-        "warmup_total_tokens": 99882,
-        "steady_state_avg_elapsed_s": 955.0224472709968,
-        "steady_state_avg_total_tokens": 53266.5,
-        "steady_state_accuracy": 0.5,
-        "speedup_after_warmup": 0.6848684170157413
-      },
-      "session": {
-        "summary": true,
-        "n_puzzles": 3,
-        "n_rounds": 3,
-        "n_solved": 2,
-        "n_resumed": 0,
-        "interrupted": false,
-        "total_elapsed": 2564.115,
-        "total_input_tokens": 128984,
-        "total_output_tokens": 77431,
-        "harness_total_elapsed": 2551.35455382301,
-        "transcription_elapsed": 12.76
-      },
-      "middleware": true,
-      "recorded_at": "2026-08-27T16:48:28+00:00",
-      "rev": "8e9189a-dirty",
-      "runs": 1
     },
     {
       "model": "~deepseek/deepseek-v4-flash-latest",

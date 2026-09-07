@@ -33,11 +33,14 @@ open-weight = [
 
 # The so called Frontier
 proprietary = [
+    { id = "openai/gpt-6-astra", expensive = true },
+    # gpt-6-astra-pro scores 2/3 on the preliminary benchmark
+    # "openai/gpt-6-astra-pro",
     "openai/gpt-5.6-sol",
     # only run if 5.6-sol doesn't score perfect
     # "openai/gpt-5.6-sol-pro",
     "openai/gpt-5.6-terra",
-    "openai/gpt-5.6-terra-pro",
+    { id = "openai/gpt-5.6-terra-pro", expensive = true },
     { id = "anthropic/claude-fable-5.1", expensive = true },
     { id = "anthropic/claude-fable-5", expensive = true },
     { id = "anthropic/claude-fable-5", expensive = true },
@@ -107,6 +110,8 @@ disabled = [
 "deepseek/deepseek-v4-flash-vision-exp" = [0.22, 0.66]
 "google/gemini-3.8-flash" = [0.75, 3.75]
 # Do not use temporarily 50% discounted price
+"openai/gpt-6-astra" = [10, 50]
+"openai/gpt-6-astra-pro" = [10, 50]
 "openai/gpt-5.6-sol-pro" = [4, 10]
 "openai/gpt-5.6-sol" = [4, 10]
 "openai/gpt-5.5" = [5, 30]
