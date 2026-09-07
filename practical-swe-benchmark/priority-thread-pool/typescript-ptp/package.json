@@ -1,0 +1,21 @@
+{
+  "name": "priority-thread-pool",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "npm run build && node --test --test-timeout=15000 dist/test/*.test.js",
+    "example": "npm run build && node dist/example/main.js"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "typescript": "^5.7.0"
+  },
+  "dependencies": {
+    "piscina": "5.3.2"
+  }
+}
