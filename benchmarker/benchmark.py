@@ -17,6 +17,8 @@ import json
 import os
 import random
 import shlex
+import shutil
+import sys
 import time
 import tomllib
 from pathlib import Path
@@ -52,6 +54,17 @@ DEFAULT_HARNESS_CMD = "sudoku-agent-harness"
 DEFAULT_HARNESS_ID = "harness"
 DEFAULT_GRADER_MODEL = "google/gemma-4-26b-a4b-it"
 DEFAULT_VISION_MIDDLEWARE_CMD = ["python", "vision-middleware/transcribe.py"]
+
+# The harness's stderr — smolagents' step-by-step console output — kept per
+# model beside its solutions, its state file and its trace. Without `-v` that
+# stream used to be read only to quote a few hundred characters of it in an
+# error message and then dropped; a failed run left nothing to look at.
+HARNESS_LOG_FILENAME = "harness.log"
+
+# How much of the harness's stderr to hold in memory for the error message.
+# The whole stream goes to the log file regardless; this is only the tail
+# quoted when a session produced no rounds at all.
+HARNESS_STDERR_TAIL = 64 * 1024
 
 # The middleware's exit code for a failure re-running cannot fix. Kept in
 # sync with EXIT_CONFIG_ERROR in vision-middleware/transcribe.py; any other
@@ -197,6 +210,13 @@ class Benchmark:
         harness is a general-purpose runner and any other one can be dropped in
         without re-implementing the task.
 
+        Its stderr — smolagents' own console output — is teed to
+        `<solutions_dir>/harness.log`, so what the agent was doing is still
+        readable after a run that only printed a one-line error. The harness's
+        own `trace.jsonl` lands in the same directory and is the structured
+        version of the same session; the log keeps the parts that were never
+        events, including tracebacks from the harness itself.
+
         Returns (rounds_by_puzzle_id, summary, error_or_None).
         """
         argv = self.harness_cmd + [
@@ -216,14 +236,23 @@ class Benchmark:
         # Strip VIRTUAL_ENV so `uv run --project ...` doesn't warn about the
         # benchmarker's active venv clashing with the harness's project venv.
         env = {k: v for k, v in os.environ.items() if k != "VIRTUAL_ENV"}
-        # In verbose mode let the harness's stderr stream to our terminal so
-        # smolagents' step-by-step logs are visible live.
-        stderr_dest = None if self.verbose else asyncio.subprocess.PIPE
+        # smolagents prints through `rich`, which sizes its boxes to the
+        # terminal it detects. Its stderr is a pipe now (so the stream can be
+        # teed to harness.log), and rich falls back to 80 columns when it
+        # can't see a terminal, so hand it the real width. Colour is left off
+        # deliberately: it would put escape sequences in the log file, and the
+        # log outliving the run is the point.
+        if sys.stderr.isatty() and "COLUMNS" not in env:
+            env["COLUMNS"] = str(shutil.get_terminal_size((100, 24)).columns)
         try:
             proc = await asyncio.create_subprocess_exec(
                 *argv,
                 stdout=asyncio.subprocess.PIPE,
-                stderr=stderr_dest,
+                # Always a pipe, even under -v, so the stream can be written to
+                # the log on its way to the terminal. It has to be drained
+                # concurrently with stdout: a pipe left unread fills at ~64KiB
+                # and blocks the harness mid-round forever.
+                stderr=asyncio.subprocess.PIPE,
                 env=env,
             )
         except FileNotFoundError as e:
@@ -232,36 +261,93 @@ class Benchmark:
         rounds = {}
         summary = {}
         fatal_error = None
-        async for line in proc.stdout:
-            line = line.decode(errors="replace").strip()
-            if not line:
-                continue
-            try:
-                rec = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            if rec.get("summary"):
-                summary = rec
-                continue
-            pid = rec.get("item_id", rec.get("puzzle_id"))
-            if pid is None:
-                # The harness reports fatal setup errors as a bare
-                # {"success": false, "error": ...} line with no puzzle_id.
-                if rec.get("error"):
-                    fatal_error = rec["error"]
-                continue
-            rounds[pid] = rec
-            status = "OK" if rec.get("success") else f"FAILED ({rec.get('error', '?')[:80]})"
-            print(
-                f"  [{model}] round {rec.get('round')} "
-                f"(puzzle {pid}): solved={status} in {rec.get('elapsed', 0):.1f}s",
-                flush=True,
-            )
 
+        async def read_stdout():
+            nonlocal summary, fatal_error
+            async for raw in proc.stdout:
+                line = raw.decode(errors="replace").strip()
+                if not line:
+                    continue
+                try:
+                    rec = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if rec.get("summary"):
+                    summary = rec
+                    continue
+                pid = rec.get("item_id", rec.get("puzzle_id"))
+                if pid is None:
+                    # The harness reports fatal setup errors as a bare
+                    # {"success": false, "error": ...} line with no puzzle_id.
+                    if rec.get("error"):
+                        fatal_error = rec["error"]
+                    continue
+                rounds[pid] = rec
+                status = (
+                    "OK" if rec.get("success")
+                    else f"FAILED ({rec.get('error', '?')[:80]})"
+                )
+                print(
+                    f"  [{model}] round {rec.get('round')} "
+                    f"(puzzle {pid}): solved={status} in "
+                    f"{rec.get('elapsed', 0):.1f}s",
+                    flush=True,
+                )
+
+        async def read_stderr():
+            """Tee stderr to the log, keeping only a tail in memory.
+
+            Read in chunks rather than lines: smolagents draws boxes and
+            progress with carriage returns, and one "line" of that can be
+            arbitrarily long — longer than asyncio's 64KiB line limit, which
+            would raise instead of yielding.
+            """
+            tail = bytearray()
+            log = None
+            # None when something has replaced sys.stderr with a text-only
+            # object (a test capture, say); then echo decoded text instead.
+            echo = getattr(sys.stderr, "buffer", None) if self.verbose else None
+            try:
+                # Unbuffered appends of a few KiB at a time on the event loop,
+                # while the only other work here is awaiting two pipes: not
+                # worth a thread (hence the ASYNC230 waiver).
+                log = open(  # noqa: SIM115, ASYNC230
+                    solutions_dir / HARNESS_LOG_FILENAME, "ab", buffering=0
+                )
+                log.write(
+                    f"\n===== {time.strftime('%Y-%m-%d %H:%M:%S')} "
+                    f"{model} =====\n".encode()
+                )
+            except OSError as e:
+                print(f"  [{model}] could not open harness log: {e!r}")
+            try:
+                while True:
+                    chunk = await proc.stderr.read(8192)
+                    if not chunk:
+                        break
+                    if log is not None:
+                        try:
+                            log.write(chunk)
+                        except OSError:
+                            log = None  # Keep draining; losing the log is fine.
+                    if echo is not None:
+                        # Byte-for-byte, so smolagents' own line breaks and
+                        # carriage returns render the way it meant them to.
+                        echo.write(chunk)
+                        echo.flush()
+                    elif self.verbose:
+                        sys.stderr.write(chunk.decode(errors="replace"))
+                        sys.stderr.flush()
+                    tail += chunk
+                    if len(tail) > HARNESS_STDERR_TAIL:
+                        del tail[:-HARNESS_STDERR_TAIL]
+            finally:
+                if log is not None:
+                    log.close()
+            return bytes(tail).decode(errors="replace")
+
+        _, stderr_text = await asyncio.gather(read_stdout(), read_stderr())
         await proc.wait()
-        stderr_text = ""
-        if proc.stderr is not None:
-            stderr_text = (await proc.stderr.read()).decode(errors="replace")
 
         error = None
         if not rounds:

@@ -119,6 +119,26 @@ def main():
         "session without one.",
     )
     parser.add_argument(
+        "--no-trace",
+        action="store_true",
+        help="Don't write trace.jsonl. By default every agent step is logged "
+        "beside the state file in --output-dir: the model's reply, the code "
+        "taken out of it, what that code printed, and the error where there "
+        "was one. That file is how a finished run is read back — a round that "
+        "failed says nothing about whether the model wrote no <code> tags, "
+        "looped on a broken script, or ran out of time one step from an "
+        "answer.",
+    )
+    parser.add_argument(
+        "--trace-max-chars",
+        type=int,
+        default=None,
+        help="Cap on each text field in a trace event (default 20000). Pass 0 "
+        "to write replies and observations whole, which a reasoning model can "
+        "turn into a very large file. A field that was cut carries its true "
+        "length alongside it either way.",
+    )
+    parser.add_argument(
         "--models-config",
         default=None,
         help="Path to a TOML file mapping model IDs to custom endpoint "
@@ -130,7 +150,7 @@ def main():
     args = parser.parse_args()
 
     # Import late so `--help` is fast and doesn't require smolagents.
-    from .agent import run
+    from .agent import TRACE_MAX_CHARS, run
 
     try:
         result = run(
@@ -143,6 +163,11 @@ def main():
             fresh=args.fresh,
             send_images=not args.no_image,
             temperature=args.temperature,
+            trace=not args.no_trace,
+            trace_max_chars=(
+                TRACE_MAX_CHARS if args.trace_max_chars is None
+                else args.trace_max_chars
+            ),
             models_config=(
                 Path(args.models_config) if args.models_config else None
             ),

@@ -33,6 +33,7 @@ import shutil
 import sys
 import tempfile
 import time
+import uuid
 from pathlib import Path
 
 from PIL import Image
@@ -237,6 +238,45 @@ TRANSIENT_RETRY_DELAY = 5
 # for a run with no manifest at all — pinning something beats inheriting a
 # provider default that can change under the results.
 DEFAULT_TEMPERATURE = 0.1
+
+# How tool calling actually reaches the model. Passed as CodeAgent's
+# `instructions`, which smolagents splices into the system prompt just after
+# its rules (and before "Now Begin!"), so it is in force for every step of
+# every round.
+#
+# CodeAgent does not use native function calling. It greps the model's reply
+# with `<code>(.*?)</code>` and runs what it finds in the Python interpreter;
+# anything outside those tags is discarded (a markdown fence only survives by
+# a lenient fallback, and JSON/tool-call-style output — the format most
+# OpenRouter models were trained on — fails parsing outright and burns a
+# step on an error round-trip). The stock smolagents prompt mentions the tags
+# once and models trained on native tool calling routinely miss them, so
+# this restates the protocol explicitly and rules out the formats that do
+# not parse.
+CODE_CALLING_INSTRUCTIONS = """## IMPORTANT: how to call tools in this harness
+
+This harness does NOT use native function/tool calling. There is no JSON
+schema, no tool_calls field, no markdown code blocks, and no
+{"name": ..., "arguments": ...} output — none of that is ever executed.
+
+To call a tool, write plain Python between the exact tags <code> and
+</code> in your reply. The harness extracts code with the pattern
+<code>(.*?)</code> and executes it in a persistent Python interpreter;
+whatever you print() is returned to you in the next Observation:.
+
+Every reply MUST follow exactly this format, with both tags spelled exactly:
+
+Thought: <your reasoning>
+<code>
+<your Python code, calling tools as normal Python functions>
+</code>
+
+Rules:
+- Always open with <code> and close with </code> on their own lines.
+- Never use markdown code fences instead of the tags.
+- Never output tool calls as JSON or in any native tool-calling format.
+- Never end a reply without the closing </code> tag.
+- To finish the task, call final_answer(...) inside a <code> block."""
 
 # Distinguishes "the caller said nothing" from "the caller said None", which
 # means send no temperature at all. Only the first consults the manifest.
@@ -600,6 +640,237 @@ def _save_transcription(output_dir: Path, input_name: str, text: str):
         return None
 
 
+TRACE_FILENAME = "trace.jsonl"
+
+# Per-field cap on the text a trace event carries. A reasoning model's reply
+# and the stdout of a script that prints its working are both unbounded, and
+# the trace has to stay a readable companion to the state file rather than
+# becoming the largest artifact of the run. Where a field is cut the event
+# also carries the true length as `<field>_chars`, so nothing silently
+# shrinks.
+TRACE_MAX_CHARS = 20_000
+
+
+def _clip(text, limit):
+    """Return (text, full_length_or_None) with `text` cut to `limit` chars.
+
+    The second element is None when nothing was cut, which is what lets a
+    reader tell a 20k-char reply from one that merely stops there.
+    """
+    if text is None:
+        return None, None
+    if not isinstance(text, str):
+        # ActionStep.model_output is `str | list[dict] | None` — a structured
+        # reply (reasoning blocks, tool-call parts) arrives as the list.
+        try:
+            text = json.dumps(text, default=str)
+        except Exception:  # noqa: BLE001 - tracing never fails a round
+            text = repr(text)
+    if limit is None or len(text) <= limit:
+        return text, None
+    return text[:limit], len(text)
+
+
+class _TraceWriter:
+    """Append-only JSONL record of what a model actually did, step by step.
+
+    The state file says how each round came out; this says how it got there.
+    Every step's reply, the code smolagents extracted from that reply, what
+    the code printed, and the error in between — which is the only place the
+    failure modes that actually decide this benchmark are visible. A model
+    that never emits `<code>` tags, one that loops on the same broken script,
+    one that burns its budget re-reading the image and one that solved the
+    puzzle in two steps all leave identical state records: `success: false`
+    or `true`, and a number of seconds.
+
+    Nothing here can affect a score, so nothing here may cost a round: every
+    method swallows its own exceptions, and a trace that cannot be opened
+    downgrades to no tracing rather than to a failed run.
+
+    Written beside `.harness_state.json` in the output dir and appended
+    across sessions, so an earlier run of the same model survives a later
+    one. Each session opens with a `session` event and stamps its own id on
+    everything it writes, so one run can be read back out of a file holding
+    several:
+
+        jq 'select(.session=="a1b2c3d4")' trace.jsonl
+
+    `run` calls the round and session boundaries directly; the step events
+    arrive through the agent's step callbacks.
+    """
+
+    def __init__(self, path, *, max_chars=TRACE_MAX_CHARS, enabled=True):
+        self.path = Path(path).resolve()
+        # 0 or negative means "no cap", for auditing a single suspect model.
+        self.max_chars = max_chars if max_chars and max_chars > 0 else None
+        self.session = uuid.uuid4().hex[:8]
+        self.round = None
+        self.item_name = None
+        self.n_steps = 0
+        self.fh = None
+        if not enabled:
+            return
+        try:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            # Line buffered: a run killed mid-round still has every step
+            # before it on disk, which is when the trace is most wanted.
+            # Held open for the session rather than reopened per event, so
+            # no context manager here.
+            self.fh = open(self.path, "a", encoding="utf-8", buffering=1)  # noqa: SIM115
+        except OSError as e:
+            print(f"[harness] tracing disabled ({self.path}): {e!r}",
+                  file=sys.stderr)
+
+    @property
+    def enabled(self) -> bool:
+        return self.fh is not None
+
+    def event(self, event_kind: str, **fields) -> None:
+        """Write one event. Never raises."""
+        if self.fh is None:
+            return
+        rec = {
+            "ts": time.time(),
+            "session": self.session,
+            "event": event_kind,
+            "round": self.round,
+            "item_name": self.item_name,
+            **fields,
+        }
+        try:
+            self.fh.write(json.dumps(rec, default=str) + "\n")
+        except Exception as e:  # noqa: BLE001 - tracing never fails a round
+            print(f"[harness] trace write failed: {e!r}", file=sys.stderr)
+            # One broken write is usually a broken file handle; stop trying
+            # rather than repeating the complaint once per step.
+            self.close_quietly()
+
+    def round_start(self, *, round_number, item_name, **fields) -> None:
+        self.round = round_number
+        self.item_name = item_name
+        self.n_steps = 0
+        self.event("round_start", **fields)
+
+    def note(self, kind: str, detail: str, **fields) -> None:
+        """A harness decision mid-round: a retry, a fallback, a timeout.
+
+        These otherwise exist only as stderr prose, which puts the reason a
+        round took three attempts out of reach of anything but a human
+        reading the console of a run that has since scrolled away.
+        """
+        self.event("note", kind=kind, detail=detail, **fields)
+
+    def round_end(self, record: dict) -> None:
+        answer, answer_chars = _clip(record.get("final_answer"), self.max_chars)
+        self.event(
+            "round_end",
+            success=record.get("success"),
+            elapsed=record.get("elapsed"),
+            n_steps=self.n_steps,
+            attempts=record.get("attempts"),
+            middleware=record.get("middleware"),
+            temperature=record.get("temperature"),
+            input_tokens=record.get("input_tokens"),
+            output_tokens=record.get("output_tokens"),
+            final_answer=answer,
+            final_answer_chars=answer_chars,
+            error=record.get("error"),
+        )
+        self.round = None
+        self.item_name = None
+
+    def __call__(self, memory_step, agent=None) -> None:
+        """Step callback: one event per agent step, errors included.
+
+        smolagents runs the callbacks from a `finally`, so a step that failed
+        to parse or blew up in the interpreter is traced like any other —
+        those are the ones worth reading.
+
+        Runs before `_strip_step_images`, so `n_images` reports what the step
+        was carrying before the prune and the trace can show that mechanism
+        still holding a round to one image.
+        """
+        if self.fh is None:
+            return
+        try:
+            self.n_steps += 1
+            timing = getattr(memory_step, "timing", None)
+            usage = getattr(memory_step, "token_usage", None)
+            error = getattr(memory_step, "error", None)
+            tool_calls = getattr(memory_step, "tool_calls", None) or []
+            output, output_chars = _clip(
+                getattr(memory_step, "model_output", None), self.max_chars
+            )
+            code, code_chars = _clip(
+                getattr(memory_step, "code_action", None), self.max_chars
+            )
+            obs, obs_chars = _clip(
+                getattr(memory_step, "observations", None), self.max_chars
+            )
+            action, action_chars = _clip(
+                _stringify(getattr(memory_step, "action_output", None)),
+                self.max_chars,
+            )
+            self.event(
+                "step",
+                step=getattr(memory_step, "step_number", None),
+                duration=getattr(timing, "duration", None),
+                # The reply as it arrived. When `code` is null and this is
+                # not, the model wrote something the `<code>` parser could
+                # not use — the single most common way a capable model
+                # scores zero here.
+                model_output=output,
+                model_output_chars=output_chars,
+                code=code,
+                code_chars=code_chars,
+                observations=obs,
+                observations_chars=obs_chars,
+                action_output=action,
+                action_output_chars=action_chars,
+                error=f"{type(error).__name__}: {error}" if error else None,
+                is_final_answer=getattr(memory_step, "is_final_answer", None),
+                # CodeAgent registers no tools here, so this stays empty
+                # unless a model is served through native function calling.
+                tool_calls=[
+                    {"name": getattr(c, "name", None),
+                     "arguments": _clip(
+                         _stringify(getattr(c, "arguments", None)),
+                         self.max_chars)[0]}
+                    for c in tool_calls
+                ],
+                input_tokens=getattr(usage, "input_tokens", None),
+                output_tokens=getattr(usage, "output_tokens", None),
+                # How much conversation this step was sent, without copying
+                # it: the messages grow every step and would dominate the
+                # file within one round.
+                n_input_messages=len(
+                    getattr(memory_step, "model_input_messages", None) or []
+                ),
+                n_images=len(
+                    getattr(memory_step, "observations_images", None) or []
+                ),
+            )
+        except Exception as e:  # noqa: BLE001 - tracing never fails a round
+            print(f"[harness] trace step failed: {e!r}", file=sys.stderr)
+
+    def close_quietly(self) -> None:
+        """Drop the handle without writing anything more."""
+        fh, self.fh = self.fh, None
+        try:
+            if fh is not None:
+                fh.close()
+        except Exception:  # noqa: BLE001, S110 - a failed close loses nothing
+            pass
+
+    def close(self, **fields) -> None:
+        if self.fh is None:
+            return
+        self.round = None
+        self.item_name = None
+        self.event("session_end", **fields)
+        self.close_quietly()
+
+
 def _token_counts(agent) -> tuple[int, int]:
     """Session-cumulative (input, output) token counts from the agent's monitor.
 
@@ -688,6 +959,8 @@ def run(
     send_images: bool = True,
     models_config: Path | None = None,
     temperature=FROM_CONFIG,
+    trace: bool = True,
+    trace_max_chars: int = TRACE_MAX_CHARS,
 ) -> dict:
     """Run the agentic harness across a whole directory of task inputs.
 
@@ -734,6 +1007,19 @@ def run(
             `models.toml` where `default_models_config` says — the caller's
             own manifest, then the harness's — which is how the benchmarker's
             top-level models.toml is picked up without being passed.
+        trace: Log every agent step to `trace.jsonl` beside the state file —
+            the reply, the code taken out of it, what that code printed, and
+            the error where there was one. This is how a run is read back
+            afterwards: the state file says a round failed, the trace says
+            whether the model wrote no `<code>` tags, looped on a broken
+            script, or ran out of time one step from an answer. Appended
+            across sessions and stamped with a session id, so an earlier run
+            of the same model is not overwritten by a later one. Pass False
+            to write nothing.
+        trace_max_chars: Cap on each text field in a trace event (reply,
+            code, observations). 0 or less writes them whole, which a
+            reasoning model can turn into a very large file. Where a field
+            is cut, the event carries its true length as `<field>_chars`.
 
     Returns:
         dict with `success` (bool), `rounds` (list of per-round records),
@@ -798,6 +1084,15 @@ def run(
             file=sys.stderr,
         )
 
+    # Opened before the agent, which takes it as a step callback. Anything
+    # that failed above (no key, no inputs) is reported by the caller instead
+    # — there is no session yet to trace.
+    tracer = _TraceWriter(
+        output_dir / TRACE_FILENAME, max_chars=trace_max_chars, enabled=trace
+    )
+    if tracer.enabled:
+        print(f"[harness] tracing steps -> {tracer.path}", file=sys.stderr)
+
     model = LiteLLMModel(
         model_id=litellm_model_id,
         api_key=litellm_api_key,
@@ -813,6 +1108,10 @@ def run(
     agent = CodeAgent(
         tools=[],
         model=model,
+        # Spliced into the system prompt: this harness's tool-calling protocol
+        # is `<code>(.*?)</code>`, which models trained on native function
+        # calling will not guess. See CODE_CALLING_INSTRUCTIONS above.
+        instructions=CODE_CALLING_INSTRUCTIONS,
         additional_authorized_imports=[
             # Meta
             "importlib", # importlib.reload
@@ -831,9 +1130,12 @@ def run(
         stream_outputs=True,
         # CodeAgent takes no `timeout` kwarg; the per-round budget is enforced
         # between steps by this callback instead.
-        # `_strip_step_images` first, so the round's images are pruned even on
-        # the step where the deadline fires (a raising callback stops the rest).
-        step_callbacks=[_strip_step_images, deadline],
+        # Order matters, because a raising callback stops the rest:
+        # `tracer` first so even the step that trips the deadline is recorded
+        # (and while the step still has its images to count), then
+        # `_strip_step_images` so the round's images are pruned on that step
+        # too, then the deadline that may raise.
+        step_callbacks=[tracer, _strip_step_images, deadline],
         # With stream_outputs=True, smolagents renders the live token stream
         # (and all its other logging) through its logger's rich Console, which
         # defaults to stdout. stdout is our JSONL stats channel, so send the
@@ -860,6 +1162,26 @@ def run(
         )
 
     jsonl_out = sys.stdout
+
+    # Opens the session's stretch of the trace: everything a reader needs to
+    # know that these events are comparable with another session's, without
+    # having to find the run that produced them.
+    tracer.event(
+        "session",
+        model=model_id,
+        litellm_model=litellm_model_id,
+        api_base=litellm_api_base,
+        task=task_name,
+        input_set=fingerprint,
+        n_inputs=len(input_paths),
+        n_resumed=len(completed),
+        fresh=fresh,
+        send_images=send_images,
+        temperature=temperature,
+        timeout=timeout,
+        max_steps=agent.max_steps,
+        pid=os.getpid(),
+    )
 
     # ONE persistent working dir across all rounds.
     total_start = time.perf_counter()
@@ -890,6 +1212,18 @@ def run(
                 if prior is not None:
                     record = {**prior, "resumed": True}
                     rounds.append(record)
+                    # Traced too, so a session's events account for every
+                    # round the caller was shown — including the ones no
+                    # model ran here. The steps behind a replayed round are
+                    # in the trace of the session that executed it.
+                    tracer.event(
+                        "round_resumed",
+                        round=i + 1,
+                        item_name=input_path.name,
+                        success=record.get("success"),
+                        elapsed=record.get("elapsed"),
+                        middleware=record.get("middleware"),
+                    )
                     jsonl_out.write(json.dumps(record) + "\n")
                     jsonl_out.flush()
                     print(
@@ -942,6 +1276,26 @@ def run(
                 start = time.perf_counter()
                 error = None
                 final_answer = None
+                # The prompt in full, because it is what the model was
+                # actually asked: the vision and text-only variants differ,
+                # the first round's differs from the rest, and a middleware
+                # round carries a transcription none of the others saw.
+                prompt_text, prompt_chars = _clip(prompt, tracer.max_chars)
+                tracer.round_start(
+                    round_number=i + 1,
+                    item_name=input_path.name,
+                    item_id=item_id,
+                    n_rounds=n_rounds,
+                    first_executed=first_executed,
+                    send_images=send_images,
+                    middleware=transcription_text is not None,
+                    transcription_chars=(
+                        len(transcription_text)
+                        if transcription_text is not None else None
+                    ),
+                    prompt=prompt_text,
+                    prompt_chars=prompt_chars,
+                )
                 print(
                     f"\n===== Round {i + 1}/{n_rounds}: "
                     f"{input_path.name} =====",
@@ -988,6 +1342,12 @@ def run(
                                     file=sys.stderr,
                                     flush=True,
                                 )
+                                tracer.note(
+                                    "temperature_unsupported",
+                                    f"{type(e).__name__}: {e}",
+                                    rejected=temperature,
+                                    attempt=attempt + 1,
+                                )
                                 deadline.reset()
                                 final_answer = agent.run(
                                     prompt,
@@ -1007,6 +1367,14 @@ def run(
                                     f"read {input_name} itself)",
                                     file=sys.stderr,
                                     flush=True,
+                                )
+                                # The `type` column of a report says what the
+                                # manifest claims; this says what the endpoint
+                                # did when handed an image.
+                                tracer.note(
+                                    "no_image_support",
+                                    f"{type(e).__name__}: {e}",
+                                    attempt=attempt + 1,
                                 )
                                 deadline.reset()
                                 final_answer = agent.run(
@@ -1030,6 +1398,13 @@ def run(
                                     file=sys.stderr,
                                     flush=True,
                                 )
+                                tracer.note(
+                                    "transient_retry",
+                                    f"{type(e).__name__}: {e}",
+                                    attempt=attempt + 1,
+                                    of=TRANSIENT_RETRIES + 1,
+                                    retry_in=delay,
+                                )
                                 time.sleep(delay)
                                 deadline.reset()
                                 continue
@@ -1043,6 +1418,13 @@ def run(
                         f"same command to resume.",
                         file=sys.stderr,
                         flush=True,
+                    )
+                    # This round produced no record, so without the note the
+                    # trace would just stop mid-round with no reason given.
+                    tracer.note(
+                        "interrupted",
+                        f"KeyboardInterrupt during {input_path.name}",
+                        attempt=attempt + 1,
                     )
                     break
                 except Exception as e:  # noqa: BLE001 - one bad round must not kill the whole session
@@ -1101,6 +1483,9 @@ def run(
                     )
 
                 rounds.append(record)
+                # Closes the round in the trace, so the steps above it can be
+                # read against what they added up to.
+                tracer.round_end(record)
                 # Streaming stats: one JSONL line per round as it completes.
                 # Written to the REAL stdout, bypassing the stderr redirect.
                 jsonl_out.write(json.dumps(record) + "\n")
@@ -1118,6 +1503,16 @@ def run(
             )
         finally:
             _save_state(output_dir, model_id, fingerprint, rounds, task_name)
+            # In `finally` alongside the state file: a session that died is
+            # the one whose trace gets read, so it must be closed off with
+            # its totals rather than left mid-round.
+            tracer.close(
+                n_rounds=len(rounds),
+                n_solved=sum(1 for r in rounds if r.get("success")),
+                n_resumed=sum(1 for r in rounds if r.get("resumed")),
+                total_elapsed=time.perf_counter() - total_start,
+                interrupted=interrupted,
+            )
             sys.stdout = jsonl_out
             _restore_env(saved_env)
             os.chdir(cwd)

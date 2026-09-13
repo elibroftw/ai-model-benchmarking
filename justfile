@@ -8,6 +8,7 @@ HARNESS_ID := "smolagents"
 
 SUMMARIZE := "uv run cli/summarize_results.py"
 TRIAL_TABLE := "uv run cli/trial_table.py"
+SHOW_TRACE := "uv run cli/show_trace.py"
 
 # Show the available recipes.
 default:
@@ -61,3 +62,17 @@ leaderboard *FLAGS:
 # Markdown table for a trial file (default: trials/seed-42-n3-mixed.json).
 trial-table *ARGS:
     {{TRIAL_TABLE}} {{ARGS}}
+
+# No argument lists every traced model. With one, its last session is replayed:
+# each reply, the code smolagents took out of that reply, what the code printed,
+# and the error where there was one. --full stops truncating, --round N narrows
+# it, --session all reaches earlier runs of the same model.
+
+# What a model actually did, step by step: `just trace glm-5.3-flash`
+trace *ARGS:
+    {{SHOW_TRACE}} {{ARGS}}
+
+# The harness's own console output for one model, as it was logged.
+trace-log MODEL:
+    @ls results/solutions-{{HARNESS_ID}}/*{{MODEL}}*/harness.log
+    @cat results/solutions-{{HARNESS_ID}}/*{{MODEL}}*/harness.log
