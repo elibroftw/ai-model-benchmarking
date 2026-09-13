@@ -31,6 +31,7 @@ After running the benchmark, even if it fails mid-way the following command read
 | 19 | `~deepseek/deepseek-v4-flash-latest` | T | -- | 3/3 | 527.4 | $0.13 | $0.30 | 3/3 | 1,396,193 | 218,938 |
 | 20 | `qwen/qwen3.8-27b` | V | -- | 3/3* | 527.9s | $0.35 | $0.79 | 3/3 | 138,624 | 97,426 |
 | 21 | `z-ai/glm-5.2` | T | -- | 3/3 | 583.3 | $1.23 | $2.52 | 3/3 | 3,172,546 | 152,419 |
+| 22 | `deepseek/deepseek-v4.1-flash` | T | $0.17 | 2/3 | 719.0s | - | - | 2/3 | 430,367 | 66,561 |
 
 NOTE: Non-discounted prices are used to calculate costs. As of 2026-08-26 this applies to gpt-5.6-sol and glm-5.3-flash.
 
