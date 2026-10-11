@@ -5,7 +5,7 @@
   "difficulty": "mixed",
   "puzzle_fingerprint": "f42eb002956177cf75600157e616c6a5fe9fa142ae4ede4c71db6ac470bafbce",
   "created_at": "2026-08-22T10:33:26+00:00",
-  "updated_at": "2026-09-24T00:04:45+00:00",
+  "updated_at": "2026-10-11T22:29:18+00:00",
   "entries": [
     {
       "model": "anthropic/claude-opus-5.5",
@@ -935,6 +935,58 @@
       "middleware": true,
       "recorded_at": "2026-08-27T19:37:51+00:00",
       "rev": "8e9189a-dirty",
+      "runs": 1
+    },
+    {
+      "model": "qwen/qwen3.8-flash",
+      "n_puzzles": 3,
+      "n_correct": 3,
+      "n_errors": 0,
+      "n_output_images": 3,
+      "output_rate": 1.0,
+      "accuracy": 1.0,
+      "avg_elapsed_s": 118.64221270199995,
+      "input_tokens": 146990,
+      "output_tokens": 35629,
+      "total_tokens": 182619,
+      "tokens_per_correct": 60873.0,
+      "per_difficulty": {
+        "easy": {
+          "n": 1,
+          "correct": 1
+        },
+        "medium": {
+          "n": 1,
+          "correct": 1
+        },
+        "hard": {
+          "n": 1,
+          "correct": 1
+        }
+      },
+      "learning": {
+        "warmup_elapsed_s": 150.86637175599998,
+        "warmup_correct": true,
+        "warmup_total_tokens": 77063,
+        "steady_state_avg_elapsed_s": 102.53013317499995,
+        "steady_state_avg_total_tokens": 52778.0,
+        "steady_state_accuracy": 1.0,
+        "speedup_after_warmup": 1.4714344659876626
+      },
+      "session": {
+        "summary": true,
+        "n_puzzles": 3,
+        "n_rounds": 3,
+        "n_solved": 3,
+        "n_resumed": 0,
+        "interrupted": false,
+        "total_elapsed": 355.940290253,
+        "total_input_tokens": 146990,
+        "total_output_tokens": 35629
+      },
+      "middleware": false,
+      "recorded_at": "2026-10-11T22:29:18+00:00",
+      "rev": "e8af096",
       "runs": 1
     },
     {

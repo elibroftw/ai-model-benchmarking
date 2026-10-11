@@ -52,6 +52,7 @@ proprietary = [
     "meta/muse-spark-1.2",
     "meta/muse-spark-1.3",
     "xiaomi/mimo-v2.6-pro-ultraspeed",
+    "qwen/qwen3.8-flash",
 ]
 
 # baseline = [
@@ -138,6 +139,7 @@ disabled = [
 "anthropic/claude-haiku-4.5" = [1, 5]
 "x-ai/grok-4.6" = [2, 6]
 "inclusionai/ling-3.0-flash-vl" = [0.06, 0.18]
+"qwen/qwen3.8-flash" = [0.15, 0.47]
 
 [vision]
 # used for converting completed sudoku to be graded as well as the vision middleware for converting puzzles into transcriptions
