@@ -5,7 +5,7 @@
   "difficulty": "mixed",
   "puzzle_fingerprint": "f42eb002956177cf75600157e616c6a5fe9fa142ae4ede4c71db6ac470bafbce",
   "created_at": "2026-08-22T10:33:26+00:00",
-  "updated_at": "2026-10-11T22:29:18+00:00",
+  "updated_at": "2026-10-15T20:00:08+00:00",
   "entries": [
     {
       "model": "anthropic/claude-opus-5.5",
@@ -987,6 +987,58 @@
       "middleware": false,
       "recorded_at": "2026-10-11T22:29:18+00:00",
       "rev": "e8af096",
+      "runs": 1
+    },
+    {
+      "model": "google/gemini-4-argon",
+      "n_puzzles": 3,
+      "n_correct": 3,
+      "n_errors": 0,
+      "n_output_images": 3,
+      "output_rate": 1.0,
+      "accuracy": 1.0,
+      "avg_elapsed_s": 119.2009738496666,
+      "input_tokens": 85669,
+      "output_tokens": 25833,
+      "total_tokens": 111502,
+      "tokens_per_correct": 37167.333333333336,
+      "per_difficulty": {
+        "easy": {
+          "n": 1,
+          "correct": 1
+        },
+        "medium": {
+          "n": 1,
+          "correct": 1
+        },
+        "hard": {
+          "n": 1,
+          "correct": 1
+        }
+      },
+      "learning": {
+        "warmup_elapsed_s": 154.90892927200002,
+        "warmup_correct": true,
+        "warmup_total_tokens": 37333,
+        "steady_state_avg_elapsed_s": 101.34699613849989,
+        "steady_state_avg_total_tokens": 37084.5,
+        "steady_state_accuracy": 1.0,
+        "speedup_after_warmup": 1.5285004506724884
+      },
+      "session": {
+        "summary": true,
+        "n_puzzles": 3,
+        "n_rounds": 3,
+        "n_solved": 3,
+        "n_resumed": 0,
+        "interrupted": false,
+        "total_elapsed": 357.6072690159999,
+        "total_input_tokens": 85669,
+        "total_output_tokens": 25833
+      },
+      "middleware": false,
+      "recorded_at": "2026-10-15T02:44:29+00:00",
+      "rev": "52d500d",
       "runs": 1
     },
     {
@@ -2579,6 +2631,58 @@
       }
     },
     {
+      "model": "meta/muse-spark-open",
+      "n_puzzles": 3,
+      "n_correct": 3,
+      "n_errors": 0,
+      "n_output_images": 3,
+      "output_rate": 1.0,
+      "accuracy": 1.0,
+      "avg_elapsed_s": 492.54802016300283,
+      "input_tokens": 177563,
+      "output_tokens": 159074,
+      "total_tokens": 336637,
+      "tokens_per_correct": 112212.33333333333,
+      "per_difficulty": {
+        "easy": {
+          "n": 1,
+          "correct": 1
+        },
+        "medium": {
+          "n": 1,
+          "correct": 1
+        },
+        "hard": {
+          "n": 1,
+          "correct": 1
+        }
+      },
+      "learning": {
+        "warmup_elapsed_s": 754.544660212996,
+        "warmup_correct": true,
+        "warmup_total_tokens": 148328,
+        "steady_state_avg_elapsed_s": 361.5497001380063,
+        "steady_state_avg_total_tokens": 94154.5,
+        "steady_state_accuracy": 1.0,
+        "speedup_after_warmup": 2.0869735472743596
+      },
+      "session": {
+        "summary": true,
+        "n_puzzles": 3,
+        "n_rounds": 3,
+        "n_solved": 3,
+        "n_resumed": 0,
+        "interrupted": false,
+        "total_elapsed": 1477.647897303992,
+        "total_input_tokens": 177563,
+        "total_output_tokens": 159074
+      },
+      "middleware": false,
+      "recorded_at": "2026-10-15T19:20:31+00:00",
+      "rev": "52d500d",
+      "runs": 1
+    },
+    {
       "model": "qwen/qwen3.8-max",
       "n_puzzles": 3,
       "n_correct": 3,
@@ -3230,6 +3334,58 @@
       "recorded_at": "2026-08-23T04:13:15+00:00",
       "runs": 1,
       "middleware": false
+    },
+    {
+      "model": "meta/muse-wonder",
+      "n_puzzles": 3,
+      "n_correct": 2,
+      "n_errors": 1,
+      "n_output_images": 2,
+      "output_rate": 0.6666666666666666,
+      "accuracy": 0.6666666666666666,
+      "avg_elapsed_s": 145.95940541133072,
+      "input_tokens": 86476,
+      "output_tokens": 25163,
+      "total_tokens": 111639,
+      "tokens_per_correct": 55819.5,
+      "per_difficulty": {
+        "easy": {
+          "n": 1,
+          "correct": 0
+        },
+        "medium": {
+          "n": 1,
+          "correct": 1
+        },
+        "hard": {
+          "n": 1,
+          "correct": 1
+        }
+      },
+      "learning": {
+        "warmup_elapsed_s": 286.19261064399325,
+        "warmup_correct": false,
+        "warmup_total_tokens": 0,
+        "steady_state_avg_elapsed_s": 75.84280279499944,
+        "steady_state_avg_total_tokens": 55819.5,
+        "steady_state_accuracy": 1.0,
+        "speedup_after_warmup": 3.7734972877724773
+      },
+      "session": {
+        "summary": true,
+        "n_puzzles": 3,
+        "n_rounds": 3,
+        "n_solved": 2,
+        "n_resumed": 0,
+        "interrupted": false,
+        "total_elapsed": 437.88184663199354,
+        "total_input_tokens": 86476,
+        "total_output_tokens": 25163
+      },
+      "middleware": false,
+      "recorded_at": "2026-10-15T20:00:08+00:00",
+      "rev": "52d500d",
+      "runs": 1
     },
     {
       "model": "xiaomi/mimo-v2.6-flash",
