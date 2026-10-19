@@ -5,8 +5,60 @@
   "difficulty": "mixed",
   "puzzle_fingerprint": "f42eb002956177cf75600157e616c6a5fe9fa142ae4ede4c71db6ac470bafbce",
   "created_at": "2026-08-22T10:33:26+00:00",
-  "updated_at": "2026-10-15T20:00:08+00:00",
+  "updated_at": "2026-10-19T01:20:54+00:00",
   "entries": [
+    {
+      "model": "deepseek/deepseek-v4.1-flash-1017",
+      "n_puzzles": 3,
+      "n_correct": 3,
+      "n_errors": 0,
+      "n_output_images": 3,
+      "output_rate": 1.0,
+      "accuracy": 1.0,
+      "avg_elapsed_s": 36.5764325389999,
+      "input_tokens": 138390,
+      "output_tokens": 35120,
+      "total_tokens": 173510,
+      "tokens_per_correct": 57836.666666666664,
+      "per_difficulty": {
+        "easy": {
+          "n": 1,
+          "correct": 1
+        },
+        "medium": {
+          "n": 1,
+          "correct": 1
+        },
+        "hard": {
+          "n": 1,
+          "correct": 1
+        }
+      },
+      "learning": {
+        "warmup_elapsed_s": 26.264644526999973,
+        "warmup_correct": true,
+        "warmup_total_tokens": 59906,
+        "steady_state_avg_elapsed_s": 41.732326544999864,
+        "steady_state_avg_total_tokens": 56802.0,
+        "steady_state_accuracy": 1.0,
+        "speedup_after_warmup": 0.6293597002956178
+      },
+      "session": {
+        "summary": true,
+        "n_puzzles": 3,
+        "n_rounds": 3,
+        "n_solved": 3,
+        "n_resumed": 0,
+        "interrupted": false,
+        "total_elapsed": 109.73397820200012,
+        "total_input_tokens": 138390,
+        "total_output_tokens": 35120
+      },
+      "middleware": false,
+      "recorded_at": "2026-10-19T01:20:54+00:00",
+      "rev": "03cd6fe",
+      "runs": 1
+    },
     {
       "model": "anthropic/claude-opus-5.5",
       "n_puzzles": 3,
@@ -2126,6 +2178,64 @@
       "runs": 1
     },
     {
+      "model": "qwen3.8-flash-next-iq3_xxs",
+      "n_puzzles": 3,
+      "n_correct": 3,
+      "n_errors": 0,
+      "n_output_images": 3,
+      "output_rate": 1.0,
+      "accuracy": 1.0,
+      "avg_elapsed_s": 333.04087126033335,
+      "input_tokens": 347314,
+      "output_tokens": 9995,
+      "total_tokens": 357309,
+      "tokens_per_correct": 119103.0,
+      "per_difficulty": {
+        "easy": {
+          "n": 1,
+          "correct": 1
+        },
+        "medium": {
+          "n": 1,
+          "correct": 1
+        },
+        "hard": {
+          "n": 1,
+          "correct": 1
+        }
+      },
+      "learning": {
+        "warmup_elapsed_s": 502.5764579820001,
+        "warmup_correct": true,
+        "warmup_total_tokens": 171958,
+        "steady_state_avg_elapsed_s": 248.27307789949998,
+        "steady_state_avg_total_tokens": 92675.5,
+        "steady_state_accuracy": 1.0,
+        "speedup_after_warmup": 2.0242889895030873
+      },
+      "session": {
+        "summary": true,
+        "n_puzzles": 3,
+        "n_rounds": 3,
+        "n_solved": 3,
+        "n_resumed": 0,
+        "interrupted": false,
+        "total_elapsed": 999.128507445,
+        "total_input_tokens": 347314,
+        "total_output_tokens": 9995
+      },
+      "middleware": false,
+      "recorded_at": "2026-10-16T23:09:25+00:00",
+      "rev": "03cd6fe",
+      "runs": 2,
+      "previous_best": {
+        "accuracy": 0.0,
+        "avg_elapsed_s": 0.24530882966665027,
+        "total_tokens": 0,
+        "recorded_at": "2026-10-16T22:47:39+00:00"
+      }
+    },
+    {
       "model": "anthropic/claude-opus-4.6",
       "n_puzzles": 3,
       "n_correct": 3,
@@ -3388,6 +3498,64 @@
       "runs": 1
     },
     {
+      "model": "google/gemma-4-31b-it",
+      "n_puzzles": 3,
+      "n_correct": 2,
+      "n_errors": 1,
+      "n_output_images": 3,
+      "output_rate": 1.0,
+      "accuracy": 0.6666666666666666,
+      "avg_elapsed_s": 226.02957518933331,
+      "input_tokens": 157829,
+      "output_tokens": 39353,
+      "total_tokens": 197182,
+      "tokens_per_correct": 98591.0,
+      "per_difficulty": {
+        "easy": {
+          "n": 1,
+          "correct": 1
+        },
+        "medium": {
+          "n": 1,
+          "correct": 1
+        },
+        "hard": {
+          "n": 1,
+          "correct": 0
+        }
+      },
+      "learning": {
+        "warmup_elapsed_s": 187.06481268100015,
+        "warmup_correct": true,
+        "warmup_total_tokens": 80251,
+        "steady_state_avg_elapsed_s": 245.5119564434999,
+        "steady_state_avg_total_tokens": 58465.5,
+        "steady_state_accuracy": 0.5,
+        "speedup_after_warmup": 0.7619376888638403
+      },
+      "session": {
+        "summary": true,
+        "n_puzzles": 3,
+        "n_rounds": 3,
+        "n_solved": 2,
+        "n_resumed": 0,
+        "interrupted": false,
+        "total_elapsed": 678.0937931560002,
+        "total_input_tokens": 157829,
+        "total_output_tokens": 39353
+      },
+      "middleware": false,
+      "recorded_at": "2026-10-16T23:29:45+00:00",
+      "rev": "03cd6fe",
+      "runs": 2,
+      "previous_best": {
+        "accuracy": 0.3333333333333333,
+        "avg_elapsed_s": 214.0857076603279,
+        "total_tokens": 267125,
+        "recorded_at": "2026-08-22T10:33:26+00:00"
+      }
+    },
+    {
       "model": "xiaomi/mimo-v2.6-flash",
       "n_puzzles": 3,
       "n_correct": 2,
@@ -3867,22 +4035,22 @@
       "middleware": false
     },
     {
-      "model": "google/gemma-4-31b-it",
+      "model": "local-qwen3.8-flash-next-iq3_xxs",
       "n_puzzles": 3,
-      "n_correct": 1,
-      "n_errors": 0,
-      "n_output_images": 3,
-      "output_rate": 1.0,
-      "accuracy": 0.3333333333333333,
-      "avg_elapsed_s": 214.0857076603279,
-      "input_tokens": 216006,
-      "output_tokens": 51119,
-      "total_tokens": 267125,
-      "tokens_per_correct": 267125.0,
+      "n_correct": 0,
+      "n_errors": 3,
+      "n_output_images": 0,
+      "output_rate": 0.0,
+      "accuracy": 0.0,
+      "avg_elapsed_s": 0.17044019000000313,
+      "input_tokens": 0,
+      "output_tokens": 0,
+      "total_tokens": 0,
+      "tokens_per_correct": null,
       "per_difficulty": {
         "easy": {
           "n": 1,
-          "correct": 1
+          "correct": 0
         },
         "medium": {
           "n": 1,
@@ -3894,28 +4062,29 @@
         }
       },
       "learning": {
-        "warmup_elapsed_s": 264.9448731579905,
-        "warmup_correct": true,
-        "warmup_total_tokens": 87782,
-        "steady_state_avg_elapsed_s": 188.6561249114966,
-        "steady_state_avg_total_tokens": 89671.5,
+        "warmup_elapsed_s": 0.4751290899999958,
+        "warmup_correct": false,
+        "warmup_total_tokens": 0,
+        "steady_state_avg_elapsed_s": 0.0180957400000068,
+        "steady_state_avg_total_tokens": 0.0,
         "steady_state_accuracy": 0.0,
-        "speedup_after_warmup": 1.4043799176002525
+        "speedup_after_warmup": 26.256405651264732
       },
       "session": {
         "summary": true,
         "n_puzzles": 3,
         "n_rounds": 3,
-        "n_solved": 3,
-        "n_resumed": 2,
+        "n_solved": 0,
+        "n_resumed": 0,
         "interrupted": false,
-        "total_elapsed": 195.42556763799803,
-        "total_input_tokens": 81986,
-        "total_output_tokens": 19091
+        "total_elapsed": 0.5156063759999938,
+        "total_input_tokens": 0,
+        "total_output_tokens": 0
       },
-      "recorded_at": "2026-08-22T10:33:26+00:00",
-      "runs": 1,
-      "middleware": false
+      "middleware": false,
+      "recorded_at": "2026-10-16T22:47:53+00:00",
+      "rev": "03cd6fe",
+      "runs": 1
     },
     {
       "model": "x-ai/grok-4.3",

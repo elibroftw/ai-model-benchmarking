@@ -15,7 +15,7 @@ open-weight = [
     # Q8_K_XL
     # TODO: cyankiwi/Qwen3.8-27B-AWQ-FP8
     "qwen/qwen3.8-27b",
-    "deepseek/deepseek-v4-flash-vision-exp",
+    "deepseek/deepseek-v4.1-flash-1017",
     "z-ai/glm-5.3-flash",
     "xiaomi/mimo-v2.6-pro",
     "xiaomi/mimo-v2.6-flash",
@@ -24,8 +24,6 @@ open-weight = [
 
     # text-only
     "deepseek/deepseek-v4-pro-0813",
-    "~deepseek/deepseek-v4-flash-latest",
-    "deepseek/deepseek-v4.1-flash",
     "z-ai/glm-5.3",
     "qwen/qwen3.8-2.4t-a95b",
     # TODO: evaluate https://ornith.ai/ornith_1_5.html
@@ -58,10 +56,11 @@ proprietary = [
     "meta/muse-wonder",
 ]
 
-# baseline = [
-#     "google/gemini-3.1-flash-lite-image",
-#     "google/gemini-3.1-flash-image"
-# ]
+[custom_models."qwen3.8-flash-next-iq3_xxs"]
+provider = "openai"
+model_name = "qwen3.8-flash-next-iq3_xxs"
+api_base = "http://127.0.0.1:8080/v1"
+api_key = "not-needed"
 
 disabled = [
     # Outdated (3/3)
@@ -109,6 +108,7 @@ disabled = [
 "meta/muse-spark-1.3" = [1.25, 4.25]
 "deepseek/deepseek-v4-pro-0813" = [0.66, 1.98]
 "deepseek/deepseek-v4.1-flash" = [0.15, 0.6]
+"deepseek/deepseek-v4.1-flash-1017" = [0.05, 0.6]
 "~deepseek/deepseek-v4-flash-latest" = [0.065, 0.18]
 "deepseek/deepseek-v4-flash-vision-exp" = [0.22, 0.66]
 "z-ai/glm-5.2" = [0.336, 1.056]
@@ -180,14 +180,3 @@ temperature = 0.1
 #
 # Example: LM Studio running a local Qwen model on port 1234.
 #
-#   [custom_models.local-qwen]
-#   provider = "openai"
-#   model_name = "qwen3.8-27b"
-#   api_base = "http://127.0.0.1:1234/v1"
-#   api_key = "not-needed"
-
-[custom_models."qwen3.8-27b@q8_k_xl"]
-provider = "openai"
-model_name = "qwen3.8-27b@q8_k_xl"
-api_base = "http://127.0.0.1:1234/v1"
-api_key = "not-needed"
