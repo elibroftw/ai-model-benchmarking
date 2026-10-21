@@ -89,6 +89,7 @@ uv run cli/run_benchmark.py \
     -v
 ```
 
+- meta/muse-wonder (October 12, 2026)
 - google/gemini-3.7-flash (August 13, 2026)
 - qwen/qwen3.8-2.4t-a95b (August 12, 2026)
 - meta/muse-glimmer-30b (August 10, 2026)
